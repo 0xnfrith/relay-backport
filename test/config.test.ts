@@ -55,9 +55,9 @@ describe("config loading", () => {
     expect(cfg.stateDir).toBe("/var/lib/rb");
     expect(cfg.sinks).toEqual(["file", "webhook", "exec"]);
     expect(cfg.deliveryWaitMs).toBe(2500);
-    expect(cfg.file).toEqual({ path: "/var/log/rb/deliveries.jsonl" });
-    expect(cfg.webhook).toEqual({ url: "https://hooks.example.com/x", bearerFile: undefined, timeoutMs: 1234, attempts: 3 });
-    expect(cfg.exec).toEqual({ command: ["/usr/local/bin/handle", "--from-relay"], timeoutMs: 60_000, passBuzzEnv: true });
+    expect(cfg.file).toEqual({ path: "/var/log/rb/deliveries.jsonl", systemPrompt: true, buzzEnvFile: undefined });
+    expect(cfg.webhook).toEqual({ url: "https://hooks.example.com/x", bearerFile: undefined, timeoutMs: 1234, attempts: 3, includeSystemPrompt: true });
+    expect(cfg.exec).toEqual({ command: ["/usr/local/bin/handle", "--from-relay"], timeoutMs: 60_000, passBuzzEnv: true, includeSystemPrompt: false });
     expect(cfg.configPath).toBe("/etc/rb.toml");
   });
 
@@ -97,8 +97,8 @@ describe("config loading", () => {
     expect(cfg.stateDir).toBe("/s");
     expect(cfg.sinks).toEqual(["webhook", "exec"]);
     expect(cfg.deliveryWaitMs).toBe(100);
-    expect(cfg.webhook).toEqual({ url: "https://h.example/x", bearerFile: "/s/bearer", timeoutMs: 5, attempts: 2 });
-    expect(cfg.exec).toEqual({ command: ["/bin/handle", "--x"], timeoutMs: 9, passBuzzEnv: true });
+    expect(cfg.webhook).toEqual({ url: "https://h.example/x", bearerFile: "/s/bearer", timeoutMs: 5, attempts: 2, includeSystemPrompt: true });
+    expect(cfg.exec).toEqual({ command: ["/bin/handle", "--x"], timeoutMs: 9, passBuzzEnv: true, includeSystemPrompt: false });
     expect(cfg.relayUrl).toBe("wss://relay.example");
     expect(cfg.file).toBeUndefined();
   });
@@ -113,6 +113,69 @@ describe("config loading", () => {
     expect(() => loadConfig({ env: { RELAY_BACKPORT_LOG_FORMAT: "xml" }, readFile })).toThrow(/log_format/);
     expect(() => loadConfig({ env: { RELAY_BACKPORT_DELIVERY_WAIT_MS: "0" }, readFile })).toThrow(/delivery_wait_ms/);
     expect(() => loadConfig({ env: { RELAY_BACKPORT_SINKS: "exec", RELAY_BACKPORT_EXEC_COMMAND: "x", RELAY_BACKPORT_EXEC_PASS_BUZZ_ENV: "maybe" }, readFile })).toThrow(/pass_buzz_env/);
+    expect(() => loadConfig({ env: { RELAY_BACKPORT_FILE_SYSTEM_PROMPT: "maybe" }, readFile })).toThrow(/file\.system_prompt/);
+    expect(() => loadConfig({ env: { RELAY_BACKPORT_SINKS: "webhook", RELAY_BACKPORT_WEBHOOK_URL: "https://h.example/x", RELAY_BACKPORT_WEBHOOK_INCLUDE_SYSTEM_PROMPT: "maybe" }, readFile })).toThrow(/webhook\.include_system_prompt/);
+    expect(() => loadConfig({ env: { RELAY_BACKPORT_SINKS: "exec", RELAY_BACKPORT_EXEC_COMMAND: "x", RELAY_BACKPORT_EXEC_INCLUDE_SYSTEM_PROMPT: "maybe" }, readFile })).toThrow(/exec\.include_system_prompt/);
+  });
+
+  test("system prompt handoff: defaults, env overrides, and describeConfig never carries a value", () => {
+    const defaults = loadConfig({ env: { HOME: "/home/u", RELAY_BACKPORT_SINKS: "file,webhook,exec", RELAY_BACKPORT_WEBHOOK_URL: "https://h.example/x", RELAY_BACKPORT_EXEC_COMMAND: "/bin/handle" }, readFile });
+    expect(defaults.file).toMatchObject({ systemPrompt: true, buzzEnvFile: undefined });
+    expect(defaults.webhook).toMatchObject({ includeSystemPrompt: true });
+    expect(defaults.exec).toMatchObject({ includeSystemPrompt: false });
+
+    const cfg = loadConfig({
+      env: {
+        HOME: "/home/u",
+        RELAY_BACKPORT_SINKS: "file,webhook,exec",
+        RELAY_BACKPORT_FILE_SYSTEM_PROMPT: "false",
+        RELAY_BACKPORT_FILE_BUZZ_ENV_FILE: "/s/buzz.env",
+        RELAY_BACKPORT_WEBHOOK_URL: "https://h.example/x",
+        RELAY_BACKPORT_WEBHOOK_INCLUDE_SYSTEM_PROMPT: "false",
+        RELAY_BACKPORT_EXEC_COMMAND: "/bin/handle",
+        RELAY_BACKPORT_EXEC_INCLUDE_SYSTEM_PROMPT: "true",
+      },
+      readFile,
+    });
+    expect(cfg.file).toMatchObject({ systemPrompt: false, buzzEnvFile: "/s/buzz.env" });
+    expect(cfg.webhook).toMatchObject({ includeSystemPrompt: false });
+    expect(cfg.exec).toMatchObject({ includeSystemPrompt: true });
+
+    const described = describeConfig(cfg);
+    expect(JSON.stringify(described)).not.toContain("nsec1");
+    expect(described).toMatchObject({
+      file: { system_prompt: false, buzz_env_file: "/s/buzz.env" },
+      webhook: { include_system_prompt: false },
+      exec: { include_system_prompt: true },
+    });
+  });
+
+  test("TOML file: file.system_prompt / file.buzz_env_file / webhook.include_system_prompt / exec.include_system_prompt", () => {
+    const cfg = loadConfig({
+      configPath: "/etc/system-prompt.toml",
+      env: {},
+      readFile: (p) =>
+        p === "/etc/system-prompt.toml"
+          ? `
+sinks = ["file", "webhook", "exec"]
+
+[file]
+system_prompt = false
+buzz_env_file = "/s/buzz.env"
+
+[webhook]
+url = "https://hooks.example.com/x"
+include_system_prompt = false
+
+[exec]
+command = ["/usr/local/bin/handle"]
+include_system_prompt = true
+`
+          : readFile(p),
+    });
+    expect(cfg.file).toEqual({ path: cfg.file!.path, systemPrompt: false, buzzEnvFile: "/s/buzz.env" });
+    expect(cfg.webhook?.includeSystemPrompt).toBe(false);
+    expect(cfg.exec?.includeSystemPrompt).toBe(true);
   });
 
   test("Buzz-injected secrets are registered for redaction at load and absent from describeConfig", () => {

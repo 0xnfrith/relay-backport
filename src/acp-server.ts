@@ -52,8 +52,8 @@ type Session = {
   id: string;
   cwd: string;
   title?: string;
-  /** Length only — the prompt text is never logged. */
-  systemPromptChars: number;
+  /** The `session/new` system prompt, verbatim, or "". Only its length is ever logged. */
+  systemPrompt: string;
   prompts: number;
   onCancel?: () => void;
 };
@@ -115,12 +115,12 @@ export function startAcpServer(opts: AcpServerOptions): AcpServerHandle {
       id: randomUUID(),
       cwd: typeof p.cwd === "string" ? p.cwd : "",
       title: typeof p._meta?.sessionTitle === "string" ? p._meta.sessionTitle : undefined,
-      systemPromptChars: systemPrompt.length,
+      systemPrompt,
       prompts: 0,
     };
     sessions.set(session.id, session);
-    log.info("acp session created", { session: session.id, cwd: session.cwd, system_prompt_chars: session.systemPromptChars, title: session.title ?? "" });
-    lifecycle({ type: "session-new", sessionId: session.id });
+    log.info("acp session created", { session: session.id, cwd: session.cwd, system_prompt_chars: session.systemPrompt.length, title: session.title ?? "" });
+    lifecycle({ type: "session-new", sessionId: session.id, systemPrompt: session.systemPrompt });
     reply(id, { sessionId: session.id, models: MODEL_STATE });
   }
 
@@ -154,6 +154,7 @@ export function startAcpServer(opts: AcpServerOptions): AcpServerHandle {
       session: { id: session.id, cwd: session.cwd, ...(session.title ? { title: session.title } : {}) },
       prompt: text,
       ...(resolved.events ? { events: resolved.events } : {}),
+      systemPrompt: session.systemPrompt,
       relay: opts.relayUrl,
       receivedAt: Math.floor(Date.now() / 1000),
     };

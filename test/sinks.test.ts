@@ -22,6 +22,7 @@ function delivery(content = "hello", over: Partial<EventLike> = {}): Delivery {
     source: "text",
     session: { id: "sess-1", cwd: "/tmp" },
     prompt: "prompt text",
+    systemPrompt: "",
     relay: "wss://relay.example",
     receivedAt: 2,
   };
@@ -37,7 +38,7 @@ describe("file sink", () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);
     const path = join(t.dir, "nested", "deliveries.jsonl");
-    const sink = new FileSink(path);
+    const sink = new FileSink({ path });
     sink.lifecycle({ type: "session-new", sessionId: "s1" });
     const d = delivery("first");
     expect(await sink.deliver(d)).toBe(true);
@@ -61,11 +62,92 @@ describe("file sink", () => {
     appendLine(path, "one");
     const { unlinkSync } = await import("node:fs");
     unlinkSync(path);
-    expect(await new FileSink(path).deliver(delivery())).toBe(true);
+    expect(await new FileSink({ path }).deliver(delivery())).toBe(true);
     expect(existsSync(path)).toBe(true);
     const blocked = join(t.dir, "file-not-dir");
     writeFileSync(blocked, "x");
-    expect(await new FileSink(join(blocked, "d.jsonl")).deliver(delivery())).toBe(false);
+    expect(await new FileSink({ path: join(blocked, "d.jsonl") }).deliver(delivery())).toBe(false);
+  });
+
+  test("a system prompt (or buzz env file) write that fails does not suppress the EVENT|session|new| lifecycle line", () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "deliveries.jsonl");
+    // stateDir points at a file, not a directory: mkdirSync for sessions/ fails
+    const blockedStateDir = join(t.dir, "not-a-dir");
+    writeFileSync(blockedStateDir, "x");
+    const sink = new FileSink({ path, stateDir: blockedStateDir, buzzEnvFile: join(blockedStateDir, "buzz.env") });
+    sink.lifecycle({ type: "session-new", sessionId: "sess-f", systemPrompt: "be terse" });
+    // both side-effect writes failed, but the lifecycle line still landed, with no path suffix
+    expect(readFileSync(path, "utf8").trimEnd().split("\n")).toEqual(["EVENT|session|new|sess-f"]);
+  });
+
+  test("a session-new lifecycle with a system prompt writes it to <state_dir>/sessions/<id>.system-prompt.md, 0600, and the EVENT line carries the path", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "deliveries.jsonl");
+    const sink = new FileSink({ path, stateDir: t.dir });
+    sink.lifecycle({ type: "session-new", sessionId: "sess-a", systemPrompt: "be terse\nnever compress" });
+    const expected = join(t.dir, "sessions", "sess-a.system-prompt.md");
+    expect(readFileSync(expected, "utf8")).toBe("be terse\nnever compress");
+    if (process.platform !== "win32") expect(statSync(expected).mode & 0o777).toBe(0o600);
+    const lines = readFileSync(path, "utf8").trimEnd().split("\n");
+    expect(lines[0]).toBe(`EVENT|session|new|sess-a|${expected}`);
+  });
+
+  test("file.system_prompt = false writes nothing to disk and leaves the EVENT line unchanged", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "deliveries.jsonl");
+    const sink = new FileSink({ path, stateDir: t.dir, systemPrompt: false });
+    sink.lifecycle({ type: "session-new", sessionId: "sess-b", systemPrompt: "do not persist me" });
+    expect(existsSync(join(t.dir, "sessions"))).toBe(false);
+    const lines = readFileSync(path, "utf8").trimEnd().split("\n");
+    expect(lines[0]).toBe("EVENT|session|new|sess-b");
+  });
+
+  test("an empty system prompt writes nothing, same as no system prompt at all", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "deliveries.jsonl");
+    const sink = new FileSink({ path, stateDir: t.dir });
+    sink.lifecycle({ type: "session-new", sessionId: "sess-c", systemPrompt: "" });
+    expect(existsSync(join(t.dir, "sessions"))).toBe(false);
+    expect(readFileSync(path, "utf8").trimEnd().split("\n")[0]).toBe("EVENT|session|new|sess-c");
+  });
+
+  test("file.buzz_env_file: writes exactly the present BUZZ_* vars as KEY=value, 0600, on every session-new; log names only the path and count", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "deliveries.jsonl");
+    const envFile = join(t.dir, "buzz.env");
+    const seen: string[] = [];
+    configureLog({ writer: (l) => seen.push(l) });
+    const sink = new FileSink({
+      path,
+      stateDir: t.dir,
+      systemPrompt: false,
+      buzzEnvFile: envFile,
+      env: { BUZZ_RELAY_URL: "wss://relay.example", BUZZ_PRIVATE_KEY: "nsec1supersecretvalue", NOSTR_PRIVATE_KEY: "unrelated" },
+    });
+    sink.lifecycle({ type: "session-new", sessionId: "sess-d" });
+    const written = readFileSync(envFile, "utf8");
+    expect(written).toBe("BUZZ_RELAY_URL=wss://relay.example\nBUZZ_PRIVATE_KEY=nsec1supersecretvalue\n");
+    if (process.platform !== "win32") expect(statSync(envFile).mode & 0o777).toBe(0o600);
+    const joined = seen.join("\n");
+    expect(joined).toContain(`wrote buzz env file ${envFile} (2 vars)`);
+    expect(joined).not.toContain("nsec1supersecretvalue");
+    configureLog({ writer: () => {} });
+  });
+
+  test("file.buzz_env_file with none of the vars present writes an empty file", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "deliveries.jsonl");
+    const envFile = join(t.dir, "buzz.env");
+    const sink = new FileSink({ path, stateDir: t.dir, buzzEnvFile: envFile, env: {} });
+    sink.lifecycle({ type: "session-new", sessionId: "sess-e" });
+    expect(readFileSync(envFile, "utf8")).toBe("");
   });
 });
 
@@ -86,13 +168,13 @@ describe("webhook sink", () => {
       },
     });
     cleanups.push(() => srv.stop(true));
-    const sink = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, bearerFile: bearerPath, timeoutMs: 2000, attempts: 1 });
+    const sink = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, bearerFile: bearerPath, timeoutMs: 2000, attempts: 1, includeSystemPrompt: true });
     const d = delivery("x");
     expect(await sink.deliver(d)).toBe(true);
     expect(got[0]?.auth).toBe("Bearer super-secret-token-value");
     expect(got[0]?.body).toMatchObject({ source: "buzz", transport: "acp", event_id: d.event.id, text: "x", prompt: "prompt text", session: { id: "sess-1" } });
     expect(redact("token super-secret-token-value here")).toBe("token [redacted] here");
-    expect(() => new WebhookSink({ url: "http://x", bearerFile: "/nope/bearer", timeoutMs: 1, attempts: 1 })).toThrow(/bearer/);
+    expect(() => new WebhookSink({ url: "http://x", bearerFile: "/nope/bearer", timeoutMs: 1, attempts: 1, includeSystemPrompt: false })).toThrow(/bearer/);
   });
 
   test("retries 5xx with backoff and gives up after attempts; 4xx is final; network errors retry", async () => {
@@ -107,7 +189,7 @@ describe("webhook sink", () => {
     });
     cleanups.push(() => srv.stop(true));
     const sleeps: number[] = [];
-    const sink = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, timeoutMs: 2000, attempts: 3 }, undefined, { sleep: async (ms) => void sleeps.push(ms) });
+    const sink = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, timeoutMs: 2000, attempts: 3, includeSystemPrompt: false }, undefined, { sleep: async (ms) => void sleeps.push(ms) });
     expect(await sink.deliver(delivery())).toBe(false);
     expect(calls).toBe(3);
     expect(sleeps).toEqual([1000, 2000]);
@@ -122,15 +204,37 @@ describe("webhook sink", () => {
       },
     });
     cleanups.push(() => srv4.stop(true));
-    expect(await new WebhookSink({ url: `http://127.0.0.1:${srv4.port}/h`, timeoutMs: 2000, attempts: 3 }, undefined, { sleep: async () => {} }).deliver(delivery())).toBe(false);
+    expect(await new WebhookSink({ url: `http://127.0.0.1:${srv4.port}/h`, timeoutMs: 2000, attempts: 3, includeSystemPrompt: false }, undefined, { sleep: async () => {} }).deliver(delivery())).toBe(false);
     expect(calls4).toBe(1);
 
     const down: number[] = [];
-    expect(await new WebhookSink({ url: "http://127.0.0.1:1/h", timeoutMs: 1000, attempts: 2 }, undefined, { sleep: async (ms) => void down.push(ms) }).deliver(delivery())).toBe(false);
+    expect(await new WebhookSink({ url: "http://127.0.0.1:1/h", timeoutMs: 1000, attempts: 2, includeSystemPrompt: false }, undefined, { sleep: async (ms) => void down.push(ms) }).deliver(delivery())).toBe(false);
     expect(down.length).toBe(1);
     expect(isRetryableStatus(429)).toBe(true);
     expect(isRetryableStatus(404)).toBe(false);
     expect(backoffMs(5)).toBe(10_000);
+  });
+
+  test("include_system_prompt: on by default in practice — the sink adds system_prompt only when told to and the session had one", async () => {
+    const got: Record<string, unknown>[] = [];
+    const srv = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      async fetch(req) {
+        got.push((await req.json()) as Record<string, unknown>);
+        return new Response("ok");
+      },
+    });
+    cleanups.push(() => srv.stop(true));
+    const withPrompt = { ...delivery("x"), systemPrompt: "be terse\nnever compress" };
+
+    const on = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, timeoutMs: 2000, attempts: 1, includeSystemPrompt: true });
+    expect(await on.deliver(withPrompt)).toBe(true);
+    expect(got[0]?.system_prompt).toBe("be terse\nnever compress");
+
+    const off = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, timeoutMs: 2000, attempts: 1, includeSystemPrompt: false });
+    expect(await off.deliver(withPrompt)).toBe(true);
+    expect("system_prompt" in got[1]!).toBe(false);
   });
 });
 
@@ -144,7 +248,7 @@ describe("exec sink", () => {
       script,
       `const ev = JSON.parse(await Bun.stdin.text());\nawait Bun.write(${JSON.stringify(out)}, (await Bun.file(${JSON.stringify(out)}).text().catch(() => "")) + ev.event_id + " " + process.env.RELAY_BACKPORT_CHANNEL + " " + process.env.RELAY_BACKPORT_SESSION_ID + " " + ev.prompt + "\\n");\n`,
     );
-    const sink = new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000, passBuzzEnv: false }, {});
+    const sink = new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000, passBuzzEnv: false, includeSystemPrompt: false }, {});
     const a = delivery("a");
     const b = delivery("b");
     const [ra, rb] = await Promise.all([sink.deliver(a), sink.deliver(b)]);
@@ -171,7 +275,7 @@ describe("exec sink", () => {
       SOMETHING_ELSE: "no",
     };
     const d = delivery("env");
-    expect(await new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000, passBuzzEnv: false }, harnessEnv).deliver(d)).toBe(true);
+    expect(await new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000, passBuzzEnv: false, includeSystemPrompt: false }, harnessEnv).deliver(d)).toBe(true);
     const seen = JSON.parse(await Bun.file(out).text()) as Record<string, string>;
     expect(seen.BUZZ_PRIVATE_KEY).toBeUndefined();
     expect(seen.BUZZ_RELAY_URL).toBeUndefined();
@@ -183,7 +287,7 @@ describe("exec sink", () => {
     expect(seen.RELAY_BACKPORT_AUTHOR).toBe(SENDER);
     for (const k of Object.keys(seen)) expect(HOOK_ENV_PASSTHROUGH.includes(k) || k.startsWith("LC_") || k.startsWith("RELAY_BACKPORT_")).toBe(true);
 
-    expect(await new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000, passBuzzEnv: true }, harnessEnv).deliver(d)).toBe(true);
+    expect(await new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000, passBuzzEnv: true, includeSystemPrompt: false }, harnessEnv).deliver(d)).toBe(true);
     const withBuzz = JSON.parse(await Bun.file(out).text()) as Record<string, string>;
     expect(withBuzz.BUZZ_PRIVATE_KEY).toBe("nsec1-should-not-reach-the-hook-by-default");
     expect(withBuzz.BUZZ_RELAY_URL).toBe("wss://relay.example");
@@ -214,8 +318,23 @@ describe("exec sink", () => {
     expect(stdout.trim()).toBe("RESULT true");
     expect(stderr).toContain("this must not appear on relay-backport stdout");
 
-    expect(await new ExecSink({ command: [process.execPath, fail], timeoutMs: 10_000, passBuzzEnv: false }, {}).deliver(delivery())).toBe(false);
-    expect(await new ExecSink({ command: [process.execPath, slow], timeoutMs: 300, passBuzzEnv: false }, {}).deliver(delivery())).toBe(false);
-    expect(await new ExecSink({ command: ["/definitely/not/a/binary"], timeoutMs: 300, passBuzzEnv: false }, {}).deliver(delivery())).toBe(false);
+    expect(await new ExecSink({ command: [process.execPath, fail], timeoutMs: 10_000, passBuzzEnv: false, includeSystemPrompt: false }, {}).deliver(delivery())).toBe(false);
+    expect(await new ExecSink({ command: [process.execPath, slow], timeoutMs: 300, passBuzzEnv: false, includeSystemPrompt: false }, {}).deliver(delivery())).toBe(false);
+    expect(await new ExecSink({ command: ["/definitely/not/a/binary"], timeoutMs: 300, passBuzzEnv: false, includeSystemPrompt: false }, {}).deliver(delivery())).toBe(false);
+  });
+
+  test("include_system_prompt: false by default, true adds system_prompt to stdin only when the session had one", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const out = join(t.dir, "out.json");
+    const script = join(t.dir, "capture.ts");
+    writeFileSync(script, `await Bun.write(${JSON.stringify(out)}, await Bun.stdin.text());\n`);
+    const withPrompt = { ...delivery("x"), systemPrompt: "be terse" };
+
+    expect(await new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000, passBuzzEnv: false, includeSystemPrompt: false }, {}).deliver(withPrompt)).toBe(true);
+    expect("system_prompt" in JSON.parse(await Bun.file(out).text())).toBe(false);
+
+    expect(await new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000, passBuzzEnv: false, includeSystemPrompt: true }, {}).deliver(withPrompt)).toBe(true);
+    expect(JSON.parse(await Bun.file(out).text()).system_prompt).toBe("be terse");
   });
 });

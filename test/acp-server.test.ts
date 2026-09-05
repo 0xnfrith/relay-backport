@@ -2,7 +2,7 @@
 // harness drives it: spawn, NDJSON over stdio, initialize → session/new →
 // session/prompt, plus cancel, unknown methods and a clean exit.
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DeliveryPayload } from "../src/delivery";
 import { CHANNEL, SENDER, buzzFramedPrompt, spawnAcp, waitFor, type AcpClient } from "./helpers/acp-client";
@@ -50,6 +50,7 @@ describe("relay-backport acp", () => {
     const srv = hookServer(got);
     const c = client(["acp"], {
       RELAY_BACKPORT_SINKS: "file,webhook,exec",
+      RELAY_BACKPORT_STATE_DIR: t.dir,
       RELAY_BACKPORT_FILE: file,
       RELAY_BACKPORT_WEBHOOK_URL: `http://127.0.0.1:${srv.port}/h`,
       RELAY_BACKPORT_EXEC_COMMAND: `${process.execPath} ${hook}`,
@@ -74,6 +75,13 @@ describe("relay-backport acp", () => {
       models: { currentModelId: "passthrough", availableModels: [{ modelId: "passthrough", name: "passthrough", description: "Forwards each mention to the configured sinks; no LLM." }] },
     });
     await waitFor(() => readFileSync(file, "utf8").includes(`EVENT|session|new|${sessionId}`), 3000, "session lifecycle line");
+
+    // the file sink persists the session/new system prompt once, to a sibling
+    // file (0600), and the EVENT line names its absolute path
+    const promptPath = join(t.dir, "sessions", `${sessionId}.system-prompt.md`);
+    expect(readFileSync(promptPath, "utf8")).toBe("be terse");
+    if (process.platform !== "win32") expect(statSync(promptPath).mode & 0o777).toBe(0o600);
+    expect(readFileSync(file, "utf8")).toContain(`EVENT|session|new|${sessionId}|${promptPath}`);
 
     // 1) a Buzz-framed prompt (no _meta)
     const text = buzzFramedPrompt({ eventId: EVENT, channel: CHANNEL, sender: SENDER, content: "bot, summarise this thread", threadRoot: ROOT });
@@ -121,6 +129,9 @@ describe("relay-backport acp", () => {
       event_source: "text",
       prompt: text,
       session: { id: sessionId, cwd: "/tmp", title: "general" },
+      // webhook.include_system_prompt defaults to true: the session/new text
+      // rides along on every POST, verbatim
+      system_prompt: "be terse",
     });
     // exec: JSON on stdin; BUZZ_* withheld by default
     const execLines = readFileSync(execOut, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { id: string; relay: string | null; key: string | null });
@@ -228,6 +239,52 @@ describe("relay-backport acp", () => {
     expect(c.updates()[1]!.update?.content?.text).toMatch(/^cancelled/);
     expect(await c.close()).toBe(0);
   }, 20_000);
+
+  test("_meta.systemPrompt.append is kept the same as the bare systemPrompt field", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const file = join(t.dir, "deliveries.jsonl");
+    const c = client(["acp"], { RELAY_BACKPORT_SINKS: "file", RELAY_BACKPORT_STATE_DIR: t.dir, RELAY_BACKPORT_FILE: file });
+    await c.request("initialize", { protocolVersion: 2 });
+    const created = await c.request("session/new", { cwd: "/tmp", mcpServers: [], _meta: { systemPrompt: { append: "via meta append" } } });
+    const sessionId = (created.result as { sessionId: string }).sessionId;
+    await waitFor(() => readFileSync(file, "utf8").includes(`EVENT|session|new|${sessionId}`), 3000, "session lifecycle line");
+    const promptPath = join(t.dir, "sessions", `${sessionId}.system-prompt.md`);
+    expect(readFileSync(promptPath, "utf8")).toBe("via meta append");
+    expect(readFileSync(file, "utf8")).toContain(`EVENT|session|new|${sessionId}|${promptPath}`);
+    expect(await c.close()).toBe(0);
+  });
+
+  test("file.buzz_env_file: writes the harness-injected BUZZ_* identity on session/new, and never logs the values", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const file = join(t.dir, "deliveries.jsonl");
+    const envFile = join(t.dir, "buzz.env");
+    const key = "nsec1envfilehandofftestvaluethatmustneverbelogged";
+    const c = client(["acp"], {
+      RELAY_BACKPORT_SINKS: "file",
+      RELAY_BACKPORT_STATE_DIR: t.dir,
+      RELAY_BACKPORT_FILE: file,
+      RELAY_BACKPORT_FILE_BUZZ_ENV_FILE: envFile,
+      RELAY_BACKPORT_FILE_SYSTEM_PROMPT: "false",
+      RELAY_BACKPORT_LOG_FORMAT: "json",
+      BUZZ_PRIVATE_KEY: key,
+      BUZZ_RELAY_URL: "wss://relay.example",
+      BUZZ_AUTH_TAG: "auth-tag-value",
+    });
+    await c.request("initialize", { protocolVersion: 2 });
+    const created = await c.request("session/new", { cwd: "/tmp", mcpServers: [] });
+    const sessionId = (created.result as { sessionId: string }).sessionId;
+    await waitFor(() => readFileSync(file, "utf8").includes(`EVENT|session|new|${sessionId}`), 3000, "session lifecycle line");
+    await waitFor(() => existsSync(envFile), 3000, "buzz env file");
+    expect(readFileSync(envFile, "utf8")).toBe(`BUZZ_RELAY_URL=wss://relay.example\nBUZZ_PRIVATE_KEY=${key}\nBUZZ_AUTH_TAG=auth-tag-value\n`);
+    // file.system_prompt=false: no sessions/ prompt file for this run
+    expect(existsSync(join(t.dir, "sessions"))).toBe(false);
+    expect(await c.close()).toBe(0);
+    const err = await c.stderr();
+    expect(err).not.toContain(key);
+    expect(err).toContain(`wrote buzz env file ${envFile} (3 vars)`);
+  });
 
   test("a config problem exits 1 before speaking ACP", async () => {
     const c = client(["acp"], { RELAY_BACKPORT_SINKS: "stdout" });

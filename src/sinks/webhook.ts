@@ -55,7 +55,7 @@ export class WebhookSink implements Sink {
   }
 
   async deliver(delivery: Delivery): Promise<boolean> {
-    const body = JSON.stringify(buildPayload(delivery));
+    const body = JSON.stringify(buildPayload(delivery, { includeSystemPrompt: this.cfg.includeSystemPrompt }));
     const headers = this.headers();
     for (let attempt = 1; attempt <= this.cfg.attempts; attempt++) {
       const started = Date.now();
