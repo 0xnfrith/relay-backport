@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { configureLog, redact, clearSecrets } from "../src/log";
 import type { MentionRecord } from "../src/mention";
 import { AcpSink } from "../src/sinks/acp";
-import { ExecSink } from "../src/sinks/exec";
+import { ExecSink, HOOK_ENV_PASSTHROUGH } from "../src/sinks/exec";
 import { StdoutSink } from "../src/sinks/stdout";
 import { WebhookSink, backoffMs, buildWebhookPayload, isRetryableStatus } from "../src/sinks/webhook";
 import { CHANNEL_A, channelMessage, keypair } from "./helpers/mock-relay";
@@ -154,6 +154,37 @@ describe("exec sink", () => {
     expect(rb).toBe(true);
     const lines = (await Bun.file(out).text()).trim().split("\n");
     expect(lines).toEqual([`${a.event.id} ${CHANNEL_A}`, `${b.event.id} ${CHANNEL_A}`]);
+  });
+
+  test("the hook sees only a minimal environment: daemon secrets are not passed through", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const out = join(t.dir, "env.json");
+    const script = join(t.dir, "dump-env.ts");
+    writeFileSync(script, `await Bun.write(${JSON.stringify(out)}, JSON.stringify(process.env));\n`);
+    process.env.PRIVATE_KEY = "nsec1-should-never-reach-the-hook";
+    process.env.WEBHOOK_BEARER_FILE = "/secret/path";
+    process.env.LC_ALL = "C";
+    cleanups.push(() => {
+      delete process.env.PRIVATE_KEY;
+      delete process.env.WEBHOOK_BEARER_FILE;
+      delete process.env.LC_ALL;
+    });
+    const sink = new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000 });
+    const r = record("env");
+    expect(await sink.deliver(r)).toBe(true);
+    const seen = JSON.parse(await Bun.file(out).text()) as Record<string, string>;
+    expect(seen.PRIVATE_KEY).toBeUndefined();
+    expect(seen.WEBHOOK_BEARER_FILE).toBeUndefined();
+    expect(JSON.stringify(seen)).not.toContain("should-never-reach");
+    expect(seen.PATH).toBe(process.env.PATH);
+    expect(seen.LC_ALL).toBe("C");
+    expect(seen.RELAY_BACKPORT_EVENT_ID).toBe(r.event.id);
+    expect(seen.RELAY_BACKPORT_CHANNEL).toBe(CHANNEL_A);
+    const allowed = new Set([...HOOK_ENV_PASSTHROUGH]);
+    for (const k of Object.keys(seen)) {
+      expect(allowed.has(k) || k.startsWith("LC_") || k.startsWith("RELAY_BACKPORT_")).toBe(true);
+    }
   });
 
   test("non-zero exit and timeout are failures", async () => {

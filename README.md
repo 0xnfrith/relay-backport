@@ -48,6 +48,7 @@ docker run -v relay-backport-data:/data -v "$PWD/key:/run/secrets/key:ro" \
   -e RELAY_URL=wss://relay.example.com -e PRIVATE_KEY_FILE=/run/secrets/key \
   -e OWNER_PUBKEY=<hex> -e SINKS=webhook -e WEBHOOK_URL=https://hooks.example.com/x \
   relay-backport
+# add  -e HEALTH_PORT=8080 -e HEALTH_HOST=0.0.0.0 -p 127.0.0.1:8080:8080  to expose /healthz on the host
 ```
 
 **From source with Bun** (`bunx` works once the package is published to npm; until then run from a checkout):
@@ -113,7 +114,7 @@ export SINKS=exec EXEC_COMMAND="/usr/local/bin/handle-mention --from-relay"
 relay-backport watch
 ```
 
-The same JSON as the webhook payload is written to the command's stdin; `RELAY_BACKPORT_EVENT_ID`, `_CHANNEL`, `_AUTHOR`, `_KIND`, `_RELAY` are set in its environment. Exit `0` means accepted. One process at a time, in arrival order, with `exec.timeout_ms` (default 60 s) before it is killed. For arguments with spaces use the config file's array form.
+The same JSON as the webhook payload is written to the command's stdin; `RELAY_BACKPORT_EVENT_ID`, `_CHANNEL`, `_AUTHOR`, `_KIND`, `_RELAY` are set in its environment. The hook gets a **minimal environment** — `PATH`, `HOME`, `USER`, `LANG`/`LC_*`, `TMPDIR`, `TZ` and the Windows basics (`SystemRoot`, `TEMP`, `TMP`, `USERPROFILE`, `COMSPEC`, …) plus the `RELAY_BACKPORT_*` variables — never the daemon's own environment, so an inline `PRIVATE_KEY` or a bearer path cannot leak into it. Exit `0` means accepted. One process at a time, in arrival order, with `exec.timeout_ms` (default 60 s) before it is killed. For arguments with spaces use the config file's array form.
 
 ### Managing the allowlist (any case)
 
@@ -286,14 +287,12 @@ flowchart LR
   acp -.-> agent
 ```
 
-![Architecture](docs/architecture.png)
-
-*`docs/architecture.png` is the hand-drawn export of the same diagram; see [`docs/architecture.md`](docs/architecture.md).*
+A hand-drawn export of the same diagram lands at `docs/architecture.png` once it exists; the Mermaid block above is the rendered reference, and [`docs/architecture.md`](docs/architecture.md) has the sequence view.
 
 ## Deploy
 
 - **systemd**: [`deploy/relay-backport.service`](deploy/relay-backport.service) — the key arrives through `LoadCredential=`, the state directory is `StateDirectory=`, exit codes 1 and 3 do not restart-loop.
-- **Docker**: [`deploy/Dockerfile`](deploy/Dockerfile) — non-root, `/data` volume, `HEALTH_HOST=0.0.0.0` preset.
+- **Docker**: [`deploy/Dockerfile`](deploy/Dockerfile) — non-root, `/data` volume. The health endpoint stays on `127.0.0.1` inside the container by default; to reach it from the host, run with `-e HEALTH_PORT=8080 -e HEALTH_HOST=0.0.0.0 -p 127.0.0.1:8080:8080` (bind the host side to loopback unless you mean to expose it).
 - **Config**: [`deploy/relay-backport.example.toml`](deploy/relay-backport.example.toml).
 
 ## Security notes

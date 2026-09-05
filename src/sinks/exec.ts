@@ -8,6 +8,44 @@ import type { MentionRecord } from "../mention";
 import { buildWebhookPayload } from "./webhook";
 import type { Sink } from "./index";
 
+/**
+ * Only these daemon-environment variables reach a hook. Everything else —
+ * PRIVATE_KEY, WEBHOOK_BEARER_FILE, whatever the operator exported — stays
+ * with the daemon.
+ */
+export const HOOK_ENV_PASSTHROUGH = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LANG",
+  "TMPDIR",
+  "TZ",
+  // Windows
+  "SystemRoot",
+  "SYSTEMROOT",
+  "TEMP",
+  "TMP",
+  "USERPROFILE",
+  "COMSPEC",
+  "PATHEXT",
+  "APPDATA",
+  "LOCALAPPDATA",
+];
+
+export function hookEnv(record: MentionRecord, from: Record<string, string | undefined>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(from)) {
+    if (v === undefined) continue;
+    if (HOOK_ENV_PASSTHROUGH.includes(k) || k.startsWith("LC_")) env[k] = v;
+  }
+  env.RELAY_BACKPORT_EVENT_ID = record.event.id;
+  env.RELAY_BACKPORT_CHANNEL = record.channel;
+  env.RELAY_BACKPORT_AUTHOR = record.event.pubkey;
+  env.RELAY_BACKPORT_KIND = String(record.event.kind);
+  env.RELAY_BACKPORT_RELAY = record.relay;
+  return env;
+}
+
 export class ExecSink implements Sink {
   readonly name = "exec";
   private queue: Promise<unknown> = Promise.resolve();
@@ -29,14 +67,7 @@ export class ExecSink implements Sink {
         stdin: "pipe" as const,
         stdout: "inherit" as const,
         stderr: "inherit" as const,
-        env: {
-          ...process.env,
-          RELAY_BACKPORT_EVENT_ID: record.event.id,
-          RELAY_BACKPORT_CHANNEL: record.channel,
-          RELAY_BACKPORT_AUTHOR: record.event.pubkey,
-          RELAY_BACKPORT_KIND: String(record.event.kind),
-          RELAY_BACKPORT_RELAY: record.relay,
-        },
+        env: hookEnv(record, process.env),
       });
     } catch (err) {
       log.error("exec spawn failed", { event: record.event.id, error: errMessage(err) });
