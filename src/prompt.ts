@@ -57,48 +57,108 @@ function asEvent(raw: unknown): EventLike | undefined {
   };
 }
 
-function lastBlock(text: string, tag: string): string | undefined {
-  const re = new RegExp(`<${tag}(?:\\s[^>]*)?>\\n?([\\s\\S]*?)\\n?</${tag}>`, "g");
-  let last: string | undefined;
-  for (const m of text.matchAll(re)) last = m[1];
-  return last;
+/**
+ * The body between the FIRST opening `<tag …>` and the LAST `</tag>` of a
+ * prompt, plus the opening tag's attributes. The harness emits at most one
+ * such block per prompt and does not escape the block body, so message text
+ * may contain a forged `</tag>\n<tag>\nEvent ID: …` sequence; taking the
+ * outermost span keeps that forgery inside the real block's `Content:`.
+ */
+function outerBlock(text: string, tag: string): { body: string; attrs: string } | undefined {
+  const open = text.match(new RegExp(`<${tag}((?:\\s[^>]*)?)>\\n?`));
+  if (!open || open.index === undefined) return undefined;
+  const start = open.index + open[0].length;
+  const end = text.lastIndexOf(`</${tag}>`);
+  if (end < start) return undefined;
+  return { body: text.slice(start, end).replace(/\n$/, ""), attrs: open[1] ?? "" };
 }
 
-/** Inside a `<buzz-events>` batch the events are separated by `--- Event N (…) ---` lines; take the last. */
-function lastEventSegment(batch: string | undefined): string | undefined {
+const SEPARATOR = /^--- Event (\d+) [^\n]*---\n/m;
+
+/**
+ * The event that routes a `<buzz-events>` batch. The harness separates events
+ * with `--- Event N (…) ---` lines, numbered 1..count, and the last one
+ * routes. Only the FIRST event's header is beyond an attacker's reach (every
+ * later byte follows some message body), so the separators are verified
+ * against the `count` attribute: exactly `count` of them, labelled 1..count in
+ * order. Any forged separator breaks that sequence, and the batch then routes
+ * on the first event instead — never on a forged one.
+ */
+function routingSegment(batch: { body: string; attrs: string } | undefined): string | undefined {
   if (!batch) return undefined;
-  const parts = batch.split(/^--- Event \d+ [^\n]*---\n/m).filter((p) => p.includes("Event ID:"));
-  return parts[parts.length - 1];
+  const count = Number.parseInt(batch.attrs.match(/count="(\d+)"/)?.[1] ?? "", 10);
+  const labels: number[] = [];
+  const parts = batch.body.split(new RegExp(SEPARATOR.source, "gm"));
+  // split() with a capture group interleaves [pre, label, segment, label, segment, …]
+  const segments: string[] = [];
+  for (let i = 1; i < parts.length; i += 2) {
+    labels.push(Number.parseInt(parts[i] ?? "", 10));
+    segments.push(parts[i + 1] ?? "");
+  }
+  if (segments.length === 0) return batch.body.includes("Event ID:") ? batch.body : undefined;
+  const wellFormed = Number.isFinite(count) && labels.length === count && labels.every((n, i) => n === i + 1);
+  return wellFormed ? segments[segments.length - 1] : segments[0];
+}
+
+/** First-match field, restricted to the header — the lines before `Content:`, which no message body precedes. */
+function headerField(segment: string, name: string): string | undefined {
+  const contentAt = segment.search(/(?:^|\n)Content: /);
+  const header = contentAt >= 0 ? segment.slice(0, contentAt) : segment;
+  return header.match(new RegExp(`^${name}: (.*)$`, "m"))?.[1]?.trim();
 }
 
 function field(block: string, name: string): string | undefined {
-  const m = block.match(new RegExp(`^${name}: (.*)$`, "m"));
-  return m?.[1]?.trim();
+  return block.match(new RegExp(`^${name}: (.*)$`, "m"))?.[1]?.trim();
 }
 
-/** Parse Buzz's text framing. Undefined when the prompt carries no `<buzz-event>` block. */
+/** The `Tags:` line the harness writes AFTER the content — the last one in the segment. */
+function lastTagsLine(segment: string): { at: number; value: string } | undefined {
+  let last: { at: number; value: string } | undefined;
+  for (const m of segment.matchAll(/^Tags: (.*)$/gm)) if (m.index !== undefined) last = { at: m.index, value: m[1] ?? "" };
+  return last;
+}
+
+/**
+ * Parse the harness's text framing. Undefined when the prompt carries no
+ * `<buzz-event>` / `<buzz-events>` block. Field order in a block is fixed
+ * (`Event ID`, `Channel`, `Kind`, `From`, `Time`, `Content`, `Tags`, `Parsed`)
+ * and only `Content:` is message text, so header fields are read from before
+ * the content and `Tags:` from after it — a forgery inside the content can
+ * neither replace a header field nor the real tags.
+ */
 export function parseBuzzPrompt(text: string): { event: EventLike; channel: string } | undefined {
-  const block = lastBlock(text, "buzz-event") ?? lastEventSegment(lastBlock(text, "buzz-events"));
+  const block = outerBlock(text, "buzz-event")?.body ?? routingSegment(outerBlock(text, "buzz-events"));
   if (!block) return undefined;
 
-  const idRaw = field(block, "Event ID");
+  const idRaw = headerField(block, "Event ID");
   const id = idRaw && HEX64.test(idRaw) ? idRaw.toLowerCase() : syntheticId(text);
-  const channelLine = field(block, "Channel") ?? field(lastBlock(text, "context") ?? "", "Channel") ?? "";
+  const channelLine = headerField(block, "Channel") ?? field(outerBlock(text, "context")?.body ?? "", "Channel") ?? "";
   const channel = channelLine.match(/#(?<id>[0-9a-f-]{36})/i)?.groups?.id?.toLowerCase() ?? channelLine.match(UUID)?.[0]?.toLowerCase() ?? "";
-  const kindRaw = Number.parseInt(field(block, "Kind") ?? "", 10);
+  const kindRaw = Number.parseInt(headerField(block, "Kind") ?? "", 10);
   const kind = Number.isFinite(kindRaw) ? kindRaw : 9;
-  const fromLine = field(block, "From") ?? "";
+  const fromLine = headerField(block, "From") ?? "";
   const pubkey = (fromLine.match(/hex: (?<hex>[0-9a-f]{64})/i)?.groups?.hex ?? fromLine.match(/[0-9a-f]{64}/i)?.[0] ?? "").toLowerCase();
-  const timeRaw = field(block, "Time");
+  const timeRaw = headerField(block, "Time");
   const parsedTime = timeRaw ? Date.parse(timeRaw) : Number.NaN;
   const created_at = Number.isFinite(parsedTime) ? Math.floor(parsedTime / 1000) : Number.parseInt(timeRaw ?? "", 10) || Math.floor(Date.now() / 1000);
-  // Content runs until the Tags/Parsed line or the end of the block (no `m` flag: `$` is end of input).
-  const content = block.match(/(?:^|\n)Content: ([\s\S]*?)(?=\nTags: |\nParsed: |$)/)?.[1] ?? "";
+
+  const contentMatch = block.match(/(?:^|\n)Content: /);
+  const contentStart = contentMatch?.index !== undefined ? contentMatch.index + contentMatch[0].length : -1;
+  const tagsLine = lastTagsLine(block);
+  let content = "";
+  if (contentStart >= 0) {
+    let contentEnd = block.length;
+    if (tagsLine && tagsLine.at > contentStart) contentEnd = tagsLine.at;
+    else {
+      const parsedAt = block.lastIndexOf("\nParsed: ");
+      if (parsedAt > contentStart) contentEnd = parsedAt + 1;
+    }
+    content = block.slice(contentStart, contentEnd).replace(/\n$/, "");
+  }
   let tags: string[][] = [];
-  const tagsRaw = field(block, "Tags");
-  if (tagsRaw) {
+  if (tagsLine && (contentStart < 0 || tagsLine.at > contentStart)) {
     try {
-      const parsed = JSON.parse(tagsRaw) as unknown;
+      const parsed = JSON.parse(tagsLine.value) as unknown;
       if (Array.isArray(parsed)) tags = parsed.filter((t): t is string[] => Array.isArray(t) && t.every((x) => typeof x === "string"));
     } catch {
       // keep going without tags

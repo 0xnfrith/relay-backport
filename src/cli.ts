@@ -49,6 +49,7 @@ export type ParsedArgs = {
 };
 
 const VALUE_FLAGS = new Set(["config", "state-dir", "file", "sink", "log-format", "lines"]);
+const BOOL_FLAGS = new Set(["help", "version", "verbose", "no-follow"]);
 const REPEATABLE = new Set(["sink"]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -80,9 +81,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
         } else {
           flags[name] = value;
         }
-      } else {
+      } else if (BOOL_FLAGS.has(name)) {
         if (value !== undefined) throw new ConfigError(`--${name} does not take a value`);
         flags[name] = true;
+      } else {
+        throw new ConfigError(`unknown option --${name}`);
       }
       continue;
     }

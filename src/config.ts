@@ -22,7 +22,7 @@ export const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 export const DEFAULT_DELIVERY_WAIT_MS = 15_000;
 
 /** Environment variables Buzz injects into a harness that must never reach a log line. */
-export const BUZZ_SECRET_ENV = ["BUZZ_PRIVATE_KEY", "BUZZ_ACP_PRIVATE_KEY", "NOSTR_PRIVATE_KEY", "BUZZ_API_TOKEN", "BUZZ_ACP_API_TOKEN"];
+export const BUZZ_SECRET_ENV = ["BUZZ_PRIVATE_KEY", "BUZZ_ACP_PRIVATE_KEY", "NOSTR_PRIVATE_KEY", "BUZZ_API_TOKEN", "BUZZ_ACP_API_TOKEN", "BUZZ_AUTH_TAG"];
 
 export class ConfigError extends Error {
   readonly exitCode = 1;

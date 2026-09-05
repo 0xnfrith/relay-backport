@@ -37,6 +37,8 @@ describe("argument parsing", () => {
     expect(() => parseArgs(["--file", "--no-follow"])).toThrow(/needs a value/);
     expect(() => parseArgs(["--no-follow=yes"])).toThrow(/does not take a value/);
     expect(() => parseArgs(["-x"])).toThrow(/unknown option/);
+    expect(() => parseArgs(["--reset-allowlist"])).toThrow(/unknown option --reset-allowlist/);
+    expect(() => parseArgs(["--flie=/x"])).toThrow(/unknown option --flie/);
   });
 });
 

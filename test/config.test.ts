@@ -119,8 +119,9 @@ describe("config loading", () => {
     clearSecrets();
     const key = "nsec1injectedbythebuzzharnessatspawn";
     const token = "buzz-api-token-value-1234";
-    const cfg = loadConfig({ env: { BUZZ_PRIVATE_KEY: key, BUZZ_API_TOKEN: token, BUZZ_RELAY_URL: "wss://r.example", HOME: "/h" }, readFile });
-    expect(redact(`k=${key} t=${token}`)).toBe("k=[redacted] t=[redacted]");
+    const tag = "auth-tag-signature-value-9876";
+    const cfg = loadConfig({ env: { BUZZ_PRIVATE_KEY: key, BUZZ_API_TOKEN: token, BUZZ_AUTH_TAG: tag, BUZZ_RELAY_URL: "wss://r.example", HOME: "/h" }, readFile });
+    expect(redact(`k=${key} t=${token} a=${tag}`)).toBe("k=[redacted] t=[redacted] a=[redacted]");
     expect(JSON.stringify(describeConfig(cfg))).not.toContain(key);
     expect(describeConfig(cfg)).toMatchObject({ sinks: ["file"], relay: "wss://r.example", webhook: null, exec: null });
   });
