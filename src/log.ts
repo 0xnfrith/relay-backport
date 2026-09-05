@@ -1,10 +1,9 @@
-// Structured logger. Everything goes to stderr: stdout is reserved for the
-// stdout sink's `MENTION|…` / `EVENT|…` contract and must stay clean.
+// Structured logger. Everything goes to stderr: stdout is the ACP JSON-RPC
+// stream to the harness (or `tail`'s output) and must stay clean.
 //
 // Every string that passes through here is scrubbed against the secret
-// registry, so a private key, control secret, signing key or webhook bearer
-// can never leak through a log line or an error message — including the
-// bech32 decoder's habit of echoing its input.
+// registry, so a harness-injected key, auth tag or API token, or a webhook
+// bearer, can never leak through a log line or an error message.
 
 export type LogFormat = "text" | "json";
 export type LogLevel = "debug" | "info" | "warn" | "error";

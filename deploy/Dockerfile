@@ -1,15 +1,13 @@
-# Multi-stage: build a single static binary, run it as a non-root user with
-# /data as the state volume. Build from the repo root:
+# Multi-stage: build a single static binary and run it as a non-root user.
+# Build from the repo root:
 #
 #   docker build -f deploy/Dockerfile -t relay-backport .
-#   docker run -v relay-backport-data:/data -v /path/to/key:/run/secrets/key:ro \
-#     -e RELAY_URL=wss://relay.example.com -e PRIVATE_KEY_FILE=/run/secrets/key \
-#     -e OWNER_PUBKEY=<hex> -e SINKS=webhook -e WEBHOOK_URL=https://... \
-#     relay-backport
+#   docker run --rm relay-backport --version
 #
-# The health endpoint binds 127.0.0.1 inside the container (unreachable from
-# the host) unless you opt in:
-#     -e HEALTH_PORT=8080 -e HEALTH_HOST=0.0.0.0 -p 127.0.0.1:8080:8080
+# relay-backport is an ACP server: on its own it waits for a harness on stdin.
+# A headless deployment pairs it with Block's `buzz-acp` in one image or pod
+# (`BUZZ_ACP_AGENT_COMMAND=relay-backport`, see README "Headless: buzz-acp");
+# this image is the building block for that. `/data` holds the delivery file.
 
 FROM oven/bun:1 AS build
 WORKDIR /src
@@ -29,8 +27,7 @@ RUN apt-get update \
 COPY --from=build /out/relay-backport /usr/local/bin/relay-backport
 USER relay
 VOLUME ["/data"]
-ENV STATE_DIR=/data \
-    HEALTH_HOST=127.0.0.1 \
-    LOG_FORMAT=json
+ENV RELAY_BACKPORT_STATE_DIR=/data \
+    RELAY_BACKPORT_LOG_FORMAT=json
 ENTRYPOINT ["/usr/local/bin/relay-backport"]
-CMD ["watch"]
+CMD ["acp"]
