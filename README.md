@@ -199,7 +199,7 @@ flowchart LR
   consumers -.->|reply with own tooling| relay
 ```
 
-[`docs/architecture.md`](docs/architecture.md) has the sequence view. The hand-drawn diagram export in `docs/architecture.svg` / `.png` predates v0.2 (it shows the removed standalone daemon) and will be re-exported.
+[`docs/architecture.md`](docs/architecture.md) has the sequence view. The hand-drawn diagram export in `docs/architecture.svg` / `.png` is the v0.2 architecture — the Buzz harness spawning `relay-backport acp` over stdio, delivering to sinks.
 
 ## What changed from v0.1, and why
 
