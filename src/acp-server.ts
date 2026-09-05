@@ -24,6 +24,22 @@ import { NAME, VERSION } from "./version";
 /** The newest ACP protocol version we know; we echo the client's when it is lower. */
 export const ACP_PROTOCOL_VERSION = 2;
 
+// relay-backport has exactly one "model": itself. There is no LLM to pick —
+// we advertise this single entry (unstable `SessionModelState`, the
+// `models` field of a `session/new`/`session/set_model` result) purely so a
+// Buzz harness's model picker resolves instead of reporting "no models".
+const MODEL_ID = "passthrough";
+const MODEL_STATE = {
+  currentModelId: MODEL_ID,
+  availableModels: [
+    {
+      modelId: MODEL_ID,
+      name: "passthrough",
+      description: "Forwards each mention to the configured sinks; no LLM.",
+    },
+  ],
+};
+
 export const JSONRPC_PARSE_ERROR = -32700;
 export const JSONRPC_INVALID_REQUEST = -32600;
 export const JSONRPC_METHOD_NOT_FOUND = -32601;
@@ -105,7 +121,18 @@ export function startAcpServer(opts: AcpServerOptions): AcpServerHandle {
     sessions.set(session.id, session);
     log.info("acp session created", { session: session.id, cwd: session.cwd, system_prompt_chars: session.systemPromptChars, title: session.title ?? "" });
     lifecycle({ type: "session-new", sessionId: session.id });
-    reply(id, { sessionId: session.id });
+    reply(id, { sessionId: session.id, models: MODEL_STATE });
+  }
+
+  /** `session/set_model` (unstable ACP path): there is only one model, so this always "succeeds" onto it. */
+  function onSessionSetModel(id: JsonRpcId, params: unknown): void {
+    const p = (params ?? {}) as { sessionId?: unknown };
+    const session = typeof p.sessionId === "string" ? sessions.get(p.sessionId) : undefined;
+    if (!session) {
+      fail(id, JSONRPC_INVALID_PARAMS, "unknown sessionId");
+      return;
+    }
+    reply(id, { models: MODEL_STATE });
   }
 
   async function onSessionPrompt(id: JsonRpcId, params: unknown): Promise<void> {
@@ -202,6 +229,9 @@ export function startAcpServer(opts: AcpServerOptions): AcpServerHandle {
         return;
       case "session/prompt":
         if (hasId) await onSessionPrompt(id, msg.params);
+        return;
+      case "session/set_model":
+        if (hasId) onSessionSetModel(id, msg.params);
         return;
       case "session/cancel":
         onSessionCancel(msg.params);

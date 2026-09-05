@@ -57,7 +57,7 @@ bun run src/cli.ts acp --config deploy/relay-backport.example.toml
    ```
 
    `args` may be empty — `acp` is the default command. Sink settings go in `env` (`{"RELAY_BACKPORT_SINKS": "webhook", "RELAY_BACKPORT_WEBHOOK_URL": "https://…"}`), in the agent's own environment variables in the Desktop, or in a config file named by `args: ["acp", "--config", "/path/to/relay-backport.toml"]`. With nothing set, the `file` sink writes to the per-user state directory.
-3. Create an agent and pick **relay-backport** as its runtime. Set its "who can send instructions" rule like any other agent — that gate is Buzz's, and it runs before a prompt ever reaches relay-backport.
+3. Create an agent and pick **relay-backport** as its runtime. Set its "who can send instructions" rule like any other agent — that gate is Buzz's, and it runs before a prompt ever reaches relay-backport. The model picker will show a single entry, **passthrough** — there is no LLM to choose, so this just satisfies the picker.
 4. For a Claude Code session, run the follower under the session's Monitor tool:
 
    ```sh

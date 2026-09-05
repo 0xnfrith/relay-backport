@@ -67,11 +67,21 @@ describe("relay-backport acp", () => {
     const created = await c.request("session/new", { cwd: "/tmp", mcpServers: [], systemPrompt: "be terse", _meta: { sessionTitle: "general" } });
     const sessionId = (created.result as { sessionId: string }).sessionId;
     expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
+    // Buzz Desktop's model picker reads this off the session/new result
+    // (unstable SessionModelState) — without it the picker reports
+    // "relay-backport reported no models".
+    expect(created.result).toMatchObject({
+      models: { currentModelId: "passthrough", availableModels: [{ modelId: "passthrough", name: "passthrough", description: "Forwards each mention to the configured sinks; no LLM." }] },
+    });
     await waitFor(() => readFileSync(file, "utf8").includes(`EVENT|session|new|${sessionId}`), 3000, "session lifecycle line");
 
     // 1) a Buzz-framed prompt (no _meta)
     const text = buzzFramedPrompt({ eventId: EVENT, channel: CHANNEL, sender: SENDER, content: "bot, summarise this thread", threadRoot: ROOT });
-    const promptId = 10;
+    // Deliberately far from the client's auto-incrementing request ids (used
+    // by every `c.request(...)` call below), and picked so its digits never
+    // appear as a substring of the raw-JSON-RPC ids (99, 100) the garbage
+    // checks near the end of this test match by `.includes(...)`.
+    const promptId = 31337;
     c.send({ id: promptId, method: "session/prompt", params: { sessionId, prompt: [{ type: "text", text }] } });
     const result = JSON.parse(await c.waitFor((l) => l.startsWith("{") && l.includes(`"id":${promptId}`), "prompt result"));
     expect(result.result).toEqual({ stopReason: "end_turn" });
@@ -129,6 +139,12 @@ describe("relay-backport acp", () => {
     expect(r3.result).toEqual({ stopReason: "end_turn" });
     expect(JSON.parse(mentionLines(file)[2]!.slice(8))).toMatchObject({ from: "unknown", h: "", content: "no framing at all" });
     expect(got[2]).toMatchObject({ event_source: "synthetic", author: "", text: "no framing at all", prompt: "no framing at all" });
+
+    // 3b) session/set_model: there is only one model, so picking it always "succeeds" back onto it
+    const switched = await c.request("session/set_model", { sessionId, modelId: "passthrough" });
+    expect(switched.error).toBeUndefined();
+    expect(switched.result).toEqual({ models: { currentModelId: "passthrough", availableModels: [{ modelId: "passthrough", name: "passthrough", description: "Forwards each mention to the configured sinks; no LLM." }] } });
+    expect((await c.request("session/set_model", { sessionId: "nope", modelId: "passthrough" })).error).toMatchObject({ code: -32602 });
 
     // 4) unknown method → method-not-found; unknown session → invalid params; a stray notification is silent
     expect((await c.request("session/load", { sessionId })).error).toMatchObject({ code: -32601 });
