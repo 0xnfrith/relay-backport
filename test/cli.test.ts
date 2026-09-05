@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { HELP, main, overridesFromFlags, parseArgs } from "../src/cli";
 import { configureLog } from "../src/log";
-import { keypair } from "./helpers/mock-relay";
+import { waitFor } from "./helpers/acp-client";
 import { tmpDir } from "./helpers/tmp";
 
 configureLog({ writer: () => {} });
@@ -12,78 +13,99 @@ afterEach(() => {
   while (cleanups.length) cleanups.pop()?.();
 });
 
-function io(env: Record<string, string> = {}) {
+function io(env: Record<string, string> = {}, extra: { stdin?: ReadableStream<Uint8Array>; signal?: AbortSignal } = {}) {
   const out: string[] = [];
   const err: string[] = [];
-  return { out: (s: string) => out.push(s), err: (s: string) => err.push(s), env, outLines: out, errLines: err };
+  return { out: (s: string) => out.push(s), err: (s: string) => err.push(s), env, outLines: out, errLines: err, ...extra };
 }
 
 describe("argument parsing", () => {
-  test("commands, positionals, value flags, booleans, repeatable --sink, --key=value", () => {
-    const a = parseArgs(["allow", "add", "abc", "--mode", "any", "--note=hi there", "--json", "--sink", "stdout", "--sink=webhook"]);
-    expect(a.command).toBe("allow");
-    expect(a.positional).toEqual(["add", "abc"]);
-    expect(a.flags).toEqual({ mode: "any", note: "hi there", json: true, sink: ["stdout", "webhook"] });
-    expect(overridesFromFlags(a.flags).sinks).toEqual(["stdout", "webhook"]);
+  test("commands, value flags, booleans, repeatable --sink, --key=value, -- terminator", () => {
+    const a = parseArgs(["tail", "--file", "/x", "--lines=5", "--no-follow", "--sink", "file", "--sink=webhook", "--", "--not-a-flag"]);
+    expect(a.command).toBe("tail");
+    expect(a.positional).toEqual(["--not-a-flag"]);
+    expect(a.flags).toEqual({ file: "/x", lines: "5", "no-follow": true, sink: ["file", "webhook"] });
+    const o = overridesFromFlags({ ...a.flags, "state-dir": "/s", "log-format": "json" });
+    expect(o).toEqual({ file: { path: "/x" }, sinks: ["file", "webhook"], state_dir: "/s", log_format: "json" });
+    expect(parseArgs([]).command).toBeUndefined();
+    expect(parseArgs(["-h"]).flags.help).toBe(true);
+    expect(parseArgs(["-v"]).flags.version).toBe(true);
   });
 
-  test("a value flag without a value, or a boolean flag with one, is an error", () => {
-    expect(() => parseArgs(["watch", "--config"])).toThrow(/needs a value/);
-    expect(() => parseArgs(["watch", "--reactions=yes"])).toThrow(/does not take a value/);
+  test("a value flag without a value, a boolean flag with one, or an unknown short option is an error", () => {
+    expect(() => parseArgs(["--file"])).toThrow(/needs a value/);
+    expect(() => parseArgs(["--file", "--no-follow"])).toThrow(/needs a value/);
+    expect(() => parseArgs(["--no-follow=yes"])).toThrow(/does not take a value/);
     expect(() => parseArgs(["-x"])).toThrow(/unknown option/);
   });
 });
 
-describe("cli exit codes", () => {
-  test("--help and --version exit 0; no command exits 1 with help", async () => {
-    let t = io();
-    expect(await main(["--help"], t)).toBe(0);
-    expect(t.outLines[0]).toBe(HELP.trimEnd());
-    t = io();
-    expect(await main(["--version"], t)).toBe(0);
-    expect(t.outLines[0]).toMatch(/^relay-backport \d+\.\d+\.\d+/);
-    t = io();
-    expect(await main([], t)).toBe(1);
-    t = io();
-    expect(await main(["frobnicate"], t)).toBe(1);
-    expect(t.errLines[0]).toMatch(/unknown command/);
+describe("main", () => {
+  test("--help and --version exit 0; a bad flag or unknown command exits 1 with a hint", async () => {
+    const h = io();
+    expect(await main(["--help"], h)).toBe(0);
+    expect(h.outLines[0]).toBe(HELP.trimEnd());
+    expect(HELP).toContain("relay-backport tail");
+    const v = io();
+    expect(await main(["--version"], v)).toBe(0);
+    expect(v.outLines[0]).toMatch(/^relay-backport \d+\.\d+\.\d+$/);
+    const bad = io();
+    expect(await main(["--file"], bad)).toBe(1);
+    expect(bad.errLines.join("\n")).toContain("--help");
+    const unknown = io();
+    expect(await main(["watch"], unknown)).toBe(1);
+    expect(unknown.errLines[0]).toContain('unknown command "watch"');
   });
 
-  test("watch with no relay configured exits 1 (config)", async () => {
-    const t = io({});
-    expect(await main(["watch"], t)).toBe(1);
-    expect(t.errLines[0]).toMatch(/relay_url/);
+  test("a config error exits 1 and prints the reason", async () => {
+    const c = io({ RELAY_BACKPORT_SINKS: "webhook" });
+    expect(await main(["acp"], c)).toBe(1);
+    expect(c.errLines[0]).toContain("webhook.url");
+    const l = io();
+    expect(await main(["tail", "--lines", "-1"], l)).toBe(1);
+    expect(l.errLines[0]).toContain("--lines");
   });
 
-  test("watch with a bad key file exits 1 and never prints the key", async () => {
-    const tmp = tmpDir();
-    cleanups.push(tmp.cleanup);
-    const keyFile = `${tmp.dir}/k`;
-    writeFileSync(keyFile, "nsec1notvalidnotvalidnotvalidnotvalidnotvalidnotvalidnotvalidnotvalid");
-    const t = io({ RELAY_URL: "wss://relay.example", PRIVATE_KEY_FILE: keyFile });
-    expect(await main(["watch"], t)).toBe(1);
-    expect(t.errLines.join("\n")).not.toContain("nsec1notvalid");
+  test("acp over an in-process stdin: JSON-RPC on `out`, nothing else; exits 0 when stdin ends", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const file = join(t.dir, "d.jsonl");
+    const stdin = new ReadableStream<Uint8Array>({
+      start(ctl) {
+        const enc = new TextEncoder();
+        ctl.enqueue(enc.encode('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}\n'));
+        ctl.enqueue(enc.encode('{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/","mcpServers":[]}}\n'));
+        ctl.close();
+      },
+    });
+    const c = io({ RELAY_BACKPORT_FILE: file }, { stdin });
+    expect(await main([], c)).toBe(0);
+    expect(c.outLines.length).toBe(2);
+    expect(JSON.parse(c.outLines[0]!).result.protocolVersion).toBe(2);
+    expect(JSON.parse(c.outLines[1]!).result.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+    const text = await Bun.file(file).text();
+    expect(text).toContain("EVENT|session|new|");
+    expect(text.trimEnd().endsWith("EVENT|acp|closed")).toBe(true);
   });
 
-  test("status / allow / stop without a daemon exit 4 (control refused)", async () => {
-    const tmp = tmpDir();
-    cleanups.push(tmp.cleanup);
-    const env = { STATE_DIR: `${tmp.dir}/state` };
-    expect(await main(["status"], io(env))).toBe(4);
-    expect(await main(["allow", "list"], io(env))).toBe(4);
-    expect(await main(["allow", "add", keypair().pk], io(env))).toBe(4);
-    expect(await main(["stop"], io(env))).toBe(4);
-    const t = io(env);
-    expect(await main(["allow", "add"], t)).toBe(1);
-    expect(t.errLines[0]).toMatch(/needs a pubkey/);
-  });
+  test("tail follows the configured file and stops on abort; --no-follow prints and returns", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const file = join(t.dir, "d.jsonl");
+    writeFileSync(file, "MENTION|{}\n");
+    const ctl = new AbortController();
+    const c = io({ RELAY_BACKPORT_FILE: file }, { signal: ctl.signal });
+    const run = main(["tail"], c);
+    await Bun.sleep(80);
+    appendFileSync(file, "EVENT|acp|closed\n");
+    await waitFor(() => c.outLines.length === 1, 2000, "followed line");
+    expect(c.outLines).toEqual(["EVENT|acp|closed"]);
+    ctl.abort();
+    expect(await run).toBe(0);
 
-  test("watch against an unreachable relay exits 2", async () => {
-    const tmp = tmpDir();
-    cleanups.push(tmp.cleanup);
-    const keyFile = `${tmp.dir}/k`;
-    writeFileSync(keyFile, keypair().hex);
-    const t = io({ RELAY_URL: "ws://127.0.0.1:1", PRIVATE_KEY_FILE: keyFile, STATE_DIR: `${tmp.dir}/state`, CONTROL_PORT: "0" });
-    expect(await main(["watch"], t)).toBe(2);
+    const once = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    writeFileSync(join(t.dir, "deliveries.jsonl"), "a\nb\n");
+    expect(await main(["tail", "--no-follow", "--lines", "1"], once)).toBe(0);
+    expect(once.outLines).toEqual(["b"]);
   });
 });

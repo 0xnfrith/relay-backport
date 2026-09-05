@@ -1,51 +1,30 @@
 # relay-backport configuration (TOML; JSON with the same keys also works).
-# Precedence: defaults < this file < environment variables < CLI flags.
-# Placeholders only — never put a key or a token in this file.
+# Precedence: defaults < this file < RELAY_BACKPORT_* environment < CLI flags.
+# Point the harness at it with `args: ["acp", "--config", "/path/to/this.toml"]`
+# or RELAY_BACKPORT_CONFIG. Placeholders only — never put a token in here.
+#
+# There is no relay URL and no key: the Buzz harness that spawns relay-backport
+# (Buzz Desktop, or a headless buzz-acp) owns both.
 
-# Relay WebSocket URL. http(s):// is upgraded to ws(s)://.
-relay_url = "wss://relay.example.com"
+# Where the default delivery file lives (deliveries.jsonl). Defaults to the
+# per-user state directory: ~/.local/state/relay-backport (XDG_STATE_HOME
+# honoured) or %LOCALAPPDATA%\relay-backport on Windows.
+# state_dir = "/var/lib/relay-backport"
 
-# One line, hex or nsec. A bare file name resolves against $CREDENTIALS_DIRECTORY
-# (systemd LoadCredential=) when that variable is set.
-private_key_file = "/etc/credstore/relay-backport.key"
+# One or more of: "file", "webhook", "exec". Default: ["file"].
+sinks = ["file"]
 
-# Where signing.key, allowlist.json, control.secret, seen.txt, cursor.txt live.
-state_dir = "/var/lib/relay-backport"
+# How long a prompt turn waits for the sinks before it ends anyway (the
+# acknowledgement then says what is still in flight).
+delivery_wait_ms = 15000
 
-# The human who owns this agent key: always allowed; the only sender whose
-# literal mention text counts. Hex or npub.
-owner_pubkey = "0000000000000000000000000000000000000000000000000000000000000000"
-
-# One or more of: "stdout", "webhook", "exec", "acp".
-sinks = ["stdout"]
-
-# Optional literal mention text, matched as a whole word in OWNER messages only.
-# mention_text = "@mybot"
-
-# Publish seen/working reactions on owner mentions; cleared on our own reply
-# or after reaction_sweep_seconds.
-reactions = false
-reaction_sweep_seconds = 1800
-
-# Message kinds to watch. 9 = channel message; add 45001 and 45003 for forums.
-kinds = [9]
-
-# Seconds between membership rediscoveries (also re-asserts the subscription).
-rediscovery_interval = 60
-
-# Max seconds of history replayed after a restart.
-replay_window_max = 86400
-
-# Health endpoint (GET /healthz). 0 = off. Use "0.0.0.0" inside containers.
-health_port = 0
-health_host = "127.0.0.1"
-
-# Control channel: loopback TCP. 0 = pick any free port (the CLI finds it via
-# STATE_DIR/control.port).
-control_port = 7477
-
-# "text" or "json" (stderr).
+# "text" or "json" (stderr; stdout is the ACP stream).
 log_format = "text"
+
+[file]
+# One MENTION|{json} line per delivery plus EVENT| lifecycle lines.
+# `relay-backport tail` follows it. Default: <state_dir>/deliveries.jsonl.
+# path = "/var/lib/relay-backport/deliveries.jsonl"
 
 [webhook]
 url = "https://hooks.example.com/relay-backport"
@@ -56,7 +35,7 @@ attempts = 3
 [exec]
 command = ["/usr/local/bin/handle-mention", "--from-relay"]
 timeout_ms = 60000
-
-[acp]
-# Scaffold only — see README "Sinks → acp".
-command = ["some-agent", "acp"]
+# Hand the harness-injected BUZZ_* variables (relay URL, private key, auth
+# tag) to the hook so it can reply with the `buzz` CLI as the agent. Off by
+# default: the hook then sees only a minimal environment.
+pass_buzz_env = false
