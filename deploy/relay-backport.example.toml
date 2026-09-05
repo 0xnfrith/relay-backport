@@ -1,0 +1,62 @@
+# relay-backport configuration (TOML; JSON with the same keys also works).
+# Precedence: defaults < this file < environment variables < CLI flags.
+# Placeholders only — never put a key or a token in this file.
+
+# Relay WebSocket URL. http(s):// is upgraded to ws(s)://.
+relay_url = "wss://relay.example.com"
+
+# One line, hex or nsec. A bare file name resolves against $CREDENTIALS_DIRECTORY
+# (systemd LoadCredential=) when that variable is set.
+private_key_file = "/etc/credstore/relay-backport.key"
+
+# Where signing.key, allowlist.json, control.secret, seen.txt, cursor.txt live.
+state_dir = "/var/lib/relay-backport"
+
+# The human who owns this agent key: always allowed; the only sender whose
+# literal mention text counts. Hex or npub.
+owner_pubkey = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# One or more of: "stdout", "webhook", "exec", "acp".
+sinks = ["stdout"]
+
+# Optional literal mention text, matched as a whole word in OWNER messages only.
+# mention_text = "@mybot"
+
+# Publish seen/working reactions on owner mentions; cleared on our own reply
+# or after reaction_sweep_seconds.
+reactions = false
+reaction_sweep_seconds = 1800
+
+# Message kinds to watch. 9 = channel message; add 45001 and 45003 for forums.
+kinds = [9]
+
+# Seconds between membership rediscoveries (also re-asserts the subscription).
+rediscovery_interval = 60
+
+# Max seconds of history replayed after a restart.
+replay_window_max = 86400
+
+# Health endpoint (GET /healthz). 0 = off. Use "0.0.0.0" inside containers.
+health_port = 0
+health_host = "127.0.0.1"
+
+# Control channel: loopback TCP. 0 = pick any free port (the CLI finds it via
+# STATE_DIR/control.port).
+control_port = 7477
+
+# "text" or "json" (stderr).
+log_format = "text"
+
+[webhook]
+url = "https://hooks.example.com/relay-backport"
+# bearer_file = "/etc/credstore/relay-backport-webhook.token"
+timeout_ms = 8000
+attempts = 3
+
+[exec]
+command = ["/usr/local/bin/handle-mention", "--from-relay"]
+timeout_ms = 60000
+
+[acp]
+# Scaffold only — see README "Sinks → acp".
+command = ["some-agent", "acp"]
