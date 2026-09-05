@@ -1,0 +1,31 @@
+{
+  "name": "relay-backport",
+  "version": "0.1.0",
+  "description": "Ears on a Buzz relay for agents that have no official Buzz integration — Claude Code terminals, webhook bots, exec hooks, ACP agents — with a runtime allowlist the daemon alone controls",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "relay-backport": "./src/cli.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "bun run src/cli.ts watch",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit",
+    "build": "bun run build:linux && bun run build:darwin && bun run build:windows",
+    "build:linux": "bun build --compile --target=bun-linux-x64 src/cli.ts --outfile dist/relay-backport-linux-x64",
+    "build:darwin": "bun build --compile --target=bun-darwin-arm64 src/cli.ts --outfile dist/relay-backport-darwin-arm64",
+    "build:windows": "bun build --compile --target=bun-windows-x64 src/cli.ts --outfile dist/relay-backport-windows-x64.exe"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.25.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.20",
+    "typescript": "^5.6.0"
+  }
+}
