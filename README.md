@@ -241,6 +241,8 @@ CLI flags for `watch`: `--config`, `--relay`, `--key-file`, `--state-dir`, `--ow
 
 ## Architecture
 
+![relay-backport architecture](docs/architecture.svg)
+
 ```mermaid
 flowchart LR
   relay[(Buzz relay<br/>NIP-29 groups · NIP-42 auth)]
@@ -287,7 +289,7 @@ flowchart LR
   acp -.-> agent
 ```
 
-A hand-drawn export of the same diagram lands at `docs/architecture.png` once it exists; the Mermaid block above is the rendered reference, and [`docs/architecture.md`](docs/architecture.md) has the sequence view.
+A hand-drawn export of the same diagram is embedded above (`docs/architecture.svg`, with a rendered `docs/architecture.png` alongside it); the Mermaid block is the plain-text reference, and [`docs/architecture.md`](docs/architecture.md) has the sequence view.
 
 ## Deploy
 
