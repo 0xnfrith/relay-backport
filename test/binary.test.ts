@@ -86,7 +86,7 @@ describe(`compiled binary${enabled ? "" : " (skipped: set RELAY_BACKPORT_BIN)"}`
         }
       }
     })();
-    await waitFor(() => relay.reqsFor("watch").length >= 1, 15_000, "daemon subscribed");
+    await waitFor(() => relay.reqsWithPrefix("watch").length >= 1, 15_000, "daemon subscribed");
 
     relay.publish(channelMessage(keypair().sk, CHANNEL_A, "stranger", [["p", bot.pk]]));
     const m = channelMessage(owner.sk, CHANNEL_A, "owner here", [["p", bot.pk]]);
@@ -146,7 +146,7 @@ describe(`compiled binary${enabled ? "" : " (skipped: set RELAY_BACKPORT_BIN)"}`
       WEBHOOK_URL: `http://127.0.0.1:${hook.port}/h`,
     };
     const daemon = spawn(["watch"], env);
-    await waitFor(() => relay.reqsFor("watch").length >= 1, 15_000, "daemon subscribed");
+    await waitFor(() => relay.reqsWithPrefix("watch").length >= 1, 15_000, "daemon subscribed");
     relay.publish(channelMessage(owner.sk, CHANNEL_A, "hook me", [["p", bot.pk]]));
     await waitFor(() => got.length === 1, 10_000, "webhook delivery");
     expect((got[0] as { text: string }).text).toBe("hook me");

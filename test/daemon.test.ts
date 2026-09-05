@@ -4,7 +4,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { controlRequest } from "../src/control";
 import { loadConfig, type Config } from "../src/config";
-import { startDaemon, type DaemonHandle, WATCH_SUB, MEMBERSHIP_SUB } from "../src/daemon";
+import { startDaemon, type DaemonHandle, WATCH_SUB, WATCH_SUB_PREFIX, MEMBERSHIP_SUB, watchSubId } from "../src/daemon";
 import { configureLog } from "../src/log";
 import { loadState, saveAllowlist, readControlFiles, statePaths } from "../src/state";
 import {
@@ -84,6 +84,9 @@ function seedMembership(s: Setup, channels: string[]): void {
 
 const mentionLines = (lines: string[]) => lines.filter((l) => l.startsWith("MENTION|"));
 
+// The daemon opens one watch REQ per channel; every test below watches CHANNEL_A.
+const WATCH_A = watchSubId(CHANNEL_A);
+
 describe("daemon end to end", () => {
   test("authenticates, discovers membership, subscribes with #h + #p, and prints an owner mention", async () => {
     const s = setup();
@@ -91,10 +94,10 @@ describe("daemon end to end", () => {
     s.relay.store(metadataEvent(s.relaySk, CHANNEL_B, true));
     s.relay.store(membersEvent(s.relaySk, CHANNEL_B, [s.bot.pk])); // archived → skipped
     const d = await s.start();
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1, 5000, "watch sub");
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1, 5000, "watch sub");
     expect(s.relay.authAttempts[0]).toEqual({ pubkey: s.bot.pk, ok: true });
     expect(d.channels()).toEqual([CHANNEL_A]);
-    const watch = s.relay.lastReq(WATCH_SUB)!;
+    const watch = s.relay.lastReq(WATCH_A)!;
     expect(watch.filters[0]).toMatchObject({ kinds: [9], "#h": [CHANNEL_A], "#p": [s.bot.pk] });
     expect(s.relay.reqsFor(MEMBERSHIP_SUB).length).toBe(1);
 
@@ -108,12 +111,49 @@ describe("daemon end to end", () => {
     expect(s.lines[0]).toBe("EVENT|connected|authed");
   });
 
+  test("one REQ per channel: a relay that only live-pushes single-channel subs still delivers", async () => {
+    // Against a live Buzz relay a REQ whose `#h` names every channel at once is
+    // accepted and replayed but never pushed, so mentions only surfaced on the
+    // next re-assert. Regression guard for that: the mock refuses multi-channel
+    // live fan-out here, the way the live relay was measured to behave.
+    const s = setup({ requireAuth: true, singleChannelFanOut: true });
+    seedMembership(s, [CHANNEL_A, CHANNEL_B]);
+    const d = await s.start();
+    await waitFor(() => s.relay.reqsWithPrefix(WATCH_SUB_PREFIX).length >= 2, 5000, "per-channel watch subs");
+    expect(new Set(d.channels())).toEqual(new Set([CHANNEL_A, CHANNEL_B]));
+    for (const ch of [CHANNEL_A, CHANNEL_B]) {
+      const req = s.relay.lastReq(watchSubId(ch))!;
+      expect(req.filters.every((f) => (f as { "#h"?: string[] })["#h"]?.length === 1)).toBe(true);
+      expect(req.filters[0]).toMatchObject({ "#h": [ch], "#p": [s.bot.pk] });
+    }
+    // no single REQ carries more than its own channel
+    expect(s.relay.reqsWithPrefix(WATCH_SUB_PREFIX).every((r) => r.filters.every((f) => (f as { "#h"?: string[] })["#h"]?.length === 1))).toBe(true);
+
+    s.relay.publish(channelMessage(s.owner.sk, CHANNEL_B, "live push", [["p", s.bot.pk]]));
+    await waitFor(() => mentionLines(s.lines).length === 1, 3000, "live mention in the second channel");
+    expect(mentionLines(s.lines)[0]).toContain("live push");
+    await d.awaitIdle();
+  });
+
+  test("a watch subscription the relay closes is re-subscribed", async () => {
+    const s = setup();
+    seedMembership(s, [CHANNEL_A]);
+    const d = await s.start();
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1, 5000, "watch sub");
+    const before = s.relay.reqsFor(WATCH_A).length;
+    s.relay.closeSub(WATCH_A, "error: transient");
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length > before, 5000, "re-subscribed after CLOSED");
+    s.relay.publish(channelMessage(s.owner.sk, CHANNEL_A, "after close", [["p", s.bot.pk]]));
+    await waitFor(() => mentionLines(s.lines).length === 1, 5000, "mention after re-subscribe");
+    await d.awaitIdle();
+  });
+
   test("owner literal text mention is delivered; the same text from a stranger is not", async () => {
     const s = setup();
     seedMembership(s, [CHANNEL_A]);
     const d = await s.start({ MENTION_TEXT: "@bot" });
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
-    expect(s.relay.lastReq(WATCH_SUB)!.filters[1]).toMatchObject({ authors: [s.owner.pk], "#h": [CHANNEL_A] });
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
+    expect(s.relay.lastReq(WATCH_A)!.filters[1]).toMatchObject({ authors: [s.owner.pk], "#h": [CHANNEL_A] });
     const stranger = keypair();
     s.relay.publish(channelMessage(stranger.sk, CHANNEL_A, "@bot from stranger"));
     s.relay.publish(channelMessage(s.owner.sk, CHANNEL_A, "@bot from owner"));
@@ -128,7 +168,7 @@ describe("daemon end to end", () => {
     const s = setup();
     seedMembership(s, [CHANNEL_A]);
     const d = await s.start({ MENTION_TEXT: "@bot" });
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
     const files = readControlFiles(statePaths(s.stateDir))!;
     const ctl = (req: Parameters<typeof controlRequest>[1]) => controlRequest({ port: files.port, secret: files.secret }, req);
 
@@ -171,7 +211,7 @@ describe("daemon end to end", () => {
     seedMembership(s, [CHANNEL_A]);
     const agent = keypair();
     const d1 = await s.start();
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
     const files = readControlFiles(statePaths(s.stateDir))!;
     await controlRequest({ port: files.port, secret: files.secret }, { cmd: "allow.add", pubkey: agent.pk, mode: "any" });
     await d1.stop();
@@ -181,7 +221,7 @@ describe("daemon end to end", () => {
     expect(readControlFiles(statePaths(s.stateDir))).toBeUndefined();
 
     const d2 = await s.start();
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 2);
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 2);
     expect(d2.snapshot().allowlist.entries).toBe(1);
     s.relay.publish(channelMessage(agent.sk, CHANNEL_A, "still here", [["p", s.bot.pk]]));
     await waitFor(() => mentionLines(s.lines).length === 1);
@@ -200,7 +240,7 @@ describe("daemon end to end", () => {
     writeFileSync(st.paths.allowlist, JSON.stringify(file));
 
     const d = await s.start();
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
     expect(d.snapshot().allowlist.refused).toEqual([{ pubkey: agent.pk, reason: "bad_mac" }]);
     expect(d.snapshot().allowlist.entries).toBe(0);
     expect(JSON.parse(readFileSync(st.paths.allowlist, "utf8")).entries).toEqual([]);
@@ -228,13 +268,13 @@ describe("daemon end to end", () => {
     const s = setup();
     seedMembership(s, [CHANNEL_A]);
     const d1 = await s.start();
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
     const m1 = channelMessage(s.owner.sk, CHANNEL_A, "one", [["p", s.bot.pk]]);
     s.relay.publish(m1);
     await waitFor(() => mentionLines(s.lines).length === 1);
     await d1.awaitIdle();
     // rediscovery re-asserts the watch REQ → the relay replays m1 → must be deduplicated
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 2, 5000, "re-asserted watch");
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 2, 5000, "re-asserted watch");
     await Bun.sleep(200);
     expect(mentionLines(s.lines).length).toBe(1);
     expect(d1.snapshot().counters.dropped_duplicate).toBeGreaterThanOrEqual(1);
@@ -250,7 +290,7 @@ describe("daemon end to end", () => {
     const d2 = await s.start();
     await waitFor(() => mentionLines(s.lines).length === 2, 5000, "gap replay");
     expect(mentionLines(s.lines)[1]).toContain(m2.id);
-    const watch = s.relay.lastReq(WATCH_SUB)!;
+    const watch = s.relay.lastReq(WATCH_A)!;
     expect(watch.filters[0]!.since).toBeLessThanOrEqual(cursor - 60);
     expect(watch.filters[0]!.since).toBeGreaterThanOrEqual(now() - 86_400);
     await Bun.sleep(150);
@@ -279,7 +319,7 @@ describe("daemon end to end", () => {
   test("rediscovery picks up a new channel without a restart", async () => {
     const s = setup();
     const d = await s.start();
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
+    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1, 5000, "global fallback sub");
     seedMembership(s, [CHANNEL_A]);
     await waitFor(() => d.channels().includes(CHANNEL_A), 5000, "rediscovered");
     s.relay.publish(channelMessage(s.owner.sk, CHANNEL_A, "found", [["p", s.bot.pk]]));
@@ -301,7 +341,7 @@ describe("daemon end to end", () => {
     });
     cleanups.push(() => hook.stop(true));
     const d = await s.start({ SINKS: "stdout,webhook", WEBHOOK_URL: `http://127.0.0.1:${hook.port}/h` });
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
     const m = channelMessage(s.owner.sk, CHANNEL_A, "to hook", [["p", s.bot.pk]]);
     s.relay.publish(m);
     await waitFor(() => got.length === 1 && mentionLines(s.lines).length === 1);
@@ -315,7 +355,7 @@ describe("daemon end to end", () => {
     const s = setup();
     seedMembership(s, [CHANNEL_A]);
     const d = await s.start({ SINKS: "stdout,webhook", WEBHOOK_URL: "http://127.0.0.1:1/h", WEBHOOK_ATTEMPTS: "1" });
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
     const m = channelMessage(s.owner.sk, CHANNEL_A, "flaky", [["p", s.bot.pk]]);
     s.relay.publish(m);
     await waitFor(() => d.snapshot().counters.delivery_failed === 1, 8000, "delivery failure");
@@ -329,8 +369,8 @@ describe("daemon end to end", () => {
     const s = setup();
     seedMembership(s, [CHANNEL_A]);
     const d = await s.start({ REACTIONS: "true" });
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
-    const watch = s.relay.lastReq(WATCH_SUB)!;
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
+    const watch = s.relay.lastReq(WATCH_A)!;
     expect(watch.filters.some((f) => f.authors?.[0] === s.bot.pk && f.kinds?.includes(45003))).toBe(true);
     const m = channelMessage(s.owner.sk, CHANNEL_A, "react please", [["p", s.bot.pk]]);
     s.relay.publish(m);
@@ -358,8 +398,8 @@ describe("daemon end to end", () => {
     const s = setup();
     seedMembership(s, [CHANNEL_A]);
     const d = await s.start({ KINDS: "9,45001,45003", MENTION_TEXT: "@bot" });
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
-    expect(s.relay.lastReq(WATCH_SUB)!.filters[0]!.kinds).toEqual([9, 45001, 45003]);
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
+    expect(s.relay.lastReq(WATCH_A)!.filters[0]!.kinds).toEqual([9, 45001, 45003]);
     const root = "c".repeat(64);
     s.relay.publish(channelMessage(s.owner.sk, CHANNEL_A, "forum reply", [["e", root], ["p", s.bot.pk]], 45003));
     await waitFor(() => mentionLines(s.lines).length === 1);
@@ -372,7 +412,7 @@ describe("daemon end to end", () => {
     s.relay.publish(channelMessage(s.owner.sk, CHANNEL_A, "typing", [["p", s.bot.pk]], 20002));
     await Bun.sleep(150);
     expect(mentionLines(s.lines).length).toBe(2);
-    expect(s.relay.lastReq(WATCH_SUB)!.filters.every((f) => !f.kinds?.includes(20002))).toBe(true);
+    expect(s.relay.lastReq(WATCH_A)!.filters.every((f) => !f.kinds?.includes(20002))).toBe(true);
     await d.awaitIdle();
   });
 
@@ -380,11 +420,11 @@ describe("daemon end to end", () => {
     const s = setup();
     seedMembership(s, [CHANNEL_A]);
     const d = await s.start();
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
     s.relay.dropAll();
     await waitFor(() => s.lines.some((l) => l.startsWith("EVENT|closed|")), 5000, "closed line");
     await waitFor(() => s.relay.authAttempts.length === 2, 8000, "reconnected + re-authed");
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 2, 5000, "re-subscribed");
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 2, 5000, "re-subscribed");
     s.relay.publish(channelMessage(s.owner.sk, CHANNEL_A, "after reconnect", [["p", s.bot.pk]]));
     await waitFor(() => mentionLines(s.lines).length === 1);
     expect(d.snapshot().counters.reconnects).toBe(1);
@@ -406,7 +446,7 @@ describe("daemon end to end", () => {
     const s = setup();
     seedMembership(s, [CHANNEL_A]);
     const d = await s.start();
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
     const files = readControlFiles(statePaths(s.stateDir))!;
     const ctl = (req: Parameters<typeof controlRequest>[1]) => controlRequest({ port: files.port, secret: files.secret }, req);
     const status = await ctl({ cmd: "status" });
@@ -428,7 +468,7 @@ describe("daemon end to end", () => {
     seedMembership(s, [CHANNEL_A]);
     const d = await s.start({ HEALTH_PORT: "0" });
     // 0 disables; pick a real port via a second daemon config is heavy, so exercise the server directly
-    await waitFor(() => s.relay.reqsFor(WATCH_SUB).length >= 1);
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1);
     expect(d.healthPort).toBeUndefined();
     const { startHealthServer } = await import("../src/health");
     const h = startHealthServer({ host: "127.0.0.1", port: 0, snapshot: () => d.snapshot() });

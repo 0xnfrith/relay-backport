@@ -22,7 +22,7 @@ import {
   type MentionRecord,
 } from "./mention";
 import { ReactionManager } from "./reactions";
-import { AuthError, ConnectError, RelayClient, nextBackoff, BACKOFF_MIN_MS } from "./relay";
+import { AuthError, ConnectError, RelayClient, nextBackoff, BACKOFF_MIN_MS, BACKOFF_MAX_MS } from "./relay";
 import { buildSinks, type Sink, type SinkFactoryOptions } from "./sinks/index";
 import {
   SeenStore,
@@ -37,8 +37,21 @@ import {
 } from "./state";
 import { VERSION } from "./version";
 
+/** Sub id used only while no channel is known yet (global `#p` fallback). */
 export const WATCH_SUB = "watch";
 export const MEMBERSHIP_SUB = "membership";
+/** One watch subscription per channel: `watch:<channel-id>`. */
+export const WATCH_SUB_PREFIX = "watch:";
+export function watchSubId(channel: string): string {
+  return WATCH_SUB_PREFIX + channel;
+}
+
+/**
+ * Minimum spacing between REQ frames. Relays admit REQs per authenticated
+ * principal in a short fixed window, so a key watching dozens of channels must
+ * not fire the whole set as one burst.
+ */
+export const REQ_PACING_MS = 60;
 
 export type DaemonOptions = {
   resetAllowlist?: boolean;
@@ -254,28 +267,124 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
   }
 
   // --- subscriptions -------------------------------------------------------
-  function watchFilters(since: number): Filter[] {
-    const filters: Filter[] = [];
-    if (channels.length === 0) {
-      filters.push({ kinds: cfg.kinds, "#p": [cfg.pubkey], since });
-      return filters;
+  // One REQ per channel. Measured against a live Buzz relay: a REQ whose `#h`
+  // names several channels is accepted, replayed and EOSE'd normally but never
+  // receives a live push, while per-channel REQs carrying the same kinds over
+  // the same traffic on the same connection do. Such a subscription therefore
+  // only ever yields events at (re)subscribe time, and mention latency
+  // collapses to the re-assert interval. The mechanism is inferred, not
+  // confirmed against a running relay: it is consistent with live-routing
+  // scope being resolved from a single channel id, leaving a multi-channel REQ
+  // on a global scope that channel-addressed events never reach. Per-channel
+  // REQs are also the shape Buzz's own client uses.
+  const watched = new Set<string>();
+  const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const retryAttempts = new Map<string, number>();
+
+  /** Paced REQ sender: first frame goes immediately, the rest one per tick. */
+  const reqQueue: (() => void)[] = [];
+  let reqDrainTimer: ReturnType<typeof setInterval> | undefined;
+  function pacedReq(send: () => void): void {
+    if (!reqDrainTimer) {
+      send();
+      reqDrainTimer = setInterval(() => {
+        const next = reqQueue.shift();
+        if (!next) {
+          if (reqDrainTimer) clearInterval(reqDrainTimer);
+          reqDrainTimer = undefined;
+          return;
+        }
+        next();
+      }, REQ_PACING_MS);
+      return;
     }
-    filters.push({ kinds: cfg.kinds, "#h": channels, "#p": [cfg.pubkey], since });
+    reqQueue.push(send);
+  }
+
+  function clearWatchRetries(channel?: string): void {
+    for (const [ch, timer] of retryTimers) {
+      if (channel !== undefined && ch !== channel) continue;
+      clearTimeout(timer);
+      retryTimers.delete(ch);
+    }
+    if (channel === undefined) {
+      retryAttempts.clear();
+      reqQueue.length = 0;
+      if (reqDrainTimer) clearInterval(reqDrainTimer);
+      reqDrainTimer = undefined;
+    } else {
+      retryAttempts.delete(channel);
+    }
+  }
+
+  function watchFilters(channel: string | undefined, since: number): Filter[] {
+    if (channel === undefined) return [{ kinds: cfg.kinds, "#p": [cfg.pubkey], since }];
+    const filters: Filter[] = [{ kinds: cfg.kinds, "#h": [channel], "#p": [cfg.pubkey], since }];
     if (cfg.mentionText && cfg.ownerPubkey) {
-      filters.push({ kinds: cfg.kinds, "#h": channels, authors: [cfg.ownerPubkey], since });
+      filters.push({ kinds: cfg.kinds, "#h": [channel], authors: [cfg.ownerPubkey], since });
     }
     if (cfg.reactions) {
-      filters.push({ kinds: [KIND_CHANNEL_MESSAGE, KIND_FORUM_REPLY], "#h": channels, authors: [cfg.pubkey], since });
+      filters.push({
+        kinds: [KIND_CHANNEL_MESSAGE, KIND_FORUM_REPLY],
+        "#h": [channel],
+        authors: [cfg.pubkey],
+        since,
+      });
     }
     return filters;
   }
 
+  function subscribeChannel(channel: string, since: number): void {
+    if (!relay?.connected || !channels.includes(channel)) return;
+    watched.add(channel);
+    relay.req(watchSubId(channel), watchFilters(channel, since), {
+      onEvent: (ev) => void handleEvent(ev),
+      onEose: () => retryAttempts.delete(channel),
+      onClosed: (reason) => onWatchClosed(channel, since, reason),
+    });
+  }
+
+  /**
+   * A closed watch sub is silent data loss, so retry it with backoff. A
+   * `restricted:` refusal is a membership verdict — rediscovery, not a retry,
+   * is what resolves it.
+   */
+  function onWatchClosed(channel: string, since: number, reason: string): void {
+    watched.delete(channel);
+    if (stopping || !relay?.connected) return;
+    if (reason.startsWith("restricted:")) {
+      log.warn("watch subscription refused", { channel, reason });
+      return;
+    }
+    const attempt = (retryAttempts.get(channel) ?? 0) + 1;
+    retryAttempts.set(channel, attempt);
+    const delay = Math.min(BACKOFF_MIN_MS * 2 ** (attempt - 1), BACKOFF_MAX_MS);
+    log.warn("watch subscription closed by relay, retrying", { channel, reason, in_ms: delay });
+    const timer = setTimeout(() => {
+      retryTimers.delete(channel);
+      subscribeChannel(channel, Math.min(since, Math.floor(Date.now() / 1000) - 120));
+    }, delay);
+    retryTimers.set(channel, timer);
+  }
+
   function subscribeWatch(since: number): void {
     if (!relay?.connected) return;
-    relay.req(WATCH_SUB, watchFilters(since), {
-      onEvent: (ev) => void handleEvent(ev),
-      onClosed: (reason) => log.warn("watch subscription closed by relay", { reason }),
-    });
+    for (const channel of [...watched]) {
+      if (channels.includes(channel)) continue;
+      relay.close(watchSubId(channel));
+      watched.delete(channel);
+      clearWatchRetries(channel);
+    }
+    if (channels.length === 0) {
+      relay.req(WATCH_SUB, watchFilters(undefined, since), {
+        onEvent: (ev) => void handleEvent(ev),
+        onClosed: (reason) => log.warn("watch subscription closed by relay", { reason }),
+      });
+      log.debug("watch subscribed", { channels: 0, since });
+      return;
+    }
+    if (relay.hasSub(WATCH_SUB)) relay.close(WATCH_SUB);
+    for (const channel of channels) pacedReq(() => subscribeChannel(channel, since));
     log.debug("watch subscribed", { channels: channels.length, since });
   }
 
@@ -427,6 +536,7 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
   let reconnectWaiter: ((v: void) => void) | undefined;
 
   function clearTimers(): void {
+    clearWatchRetries();
     if (rediscoveryTimer) clearInterval(rediscoveryTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (sweepTimer) clearInterval(sweepTimer);
@@ -476,6 +586,9 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
 
     const now = Math.floor(Date.now() / 1000);
     const since = replaySince(lastBeat, now, cfg.replayWindowMaxSeconds);
+    // A fresh socket carries none of the old connection's subscriptions.
+    watched.clear();
+    clearWatchRetries();
     subscribeMembership(since);
     await discover();
     subscribeWatch(since);
