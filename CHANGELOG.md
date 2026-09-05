@@ -2,11 +2,21 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## Unreleased
+## 0.2.1 — 2026-09-06
+
+**Zero-setup consumer handoff: the standing system prompt and the agent's own Buzz identity now reach every consumer, not just the per-turn prompt.**
+
+`buzz-acp` sends the whole standing context (Buzz conventions, mention/threading etiquette, memory protocol) once, on `session/new`, as the bare `systemPrompt` field (or `_meta.systemPrompt.append` for a `claude-agent-acp`-shaped client) — and relay-backport was throwing it away, keeping only its character count. A consumer with no Buzz integration got the per-turn delta but never the conventions that make it actionable, and a file-sink consumer had no way to act as the agent at all (no key, no relay URL). Both gaps close in this release; nothing about the per-turn `MENTION|` line, the webhook payload shape, or the exec hook's existing environment changes.
 
 ### Added
 
 - `session/new` now advertises one model, `passthrough` ("Forwards each mention to the configured sinks; no LLM.") in the unstable `SessionModelState` (`models: { currentModelId, availableModels }`) — without it, a Buzz harness's model picker reported "relay-backport reported no models". `session/set_model` is answered too (there is only one model, so it always "succeeds" back onto it).
+- **The `session/new` system prompt is kept and forwarded, verbatim, instead of being discarded after its length is logged.** It never appears in a log line — only its character count does.
+- **`file` sink**: on `session/new`, writes the system prompt once to `<state_dir>/sessions/<session id>.system-prompt.md` (0600, atomic write) and extends the `EVENT|session|new|<id>` lifecycle line with the file's absolute path — `EVENT|session|new|<id>|<path>` — when it wrote one. A consumer that only ever saw `EVENT|session|new|<id>` keeps working unchanged. New config: `file.system_prompt` (`RELAY_BACKPORT_FILE_SYSTEM_PROMPT`, default `true`).
+- **`file.buzz_env_file`** (`RELAY_BACKPORT_FILE_BUZZ_ENV_FILE`, default unset): when set, (re)writes the harness-injected `BUZZ_RELAY_URL` / `BUZZ_PRIVATE_KEY` / `BUZZ_AUTH_TAG` — whichever are present — as `KEY=value` lines to that path (0600, atomic) on every `session/new`. This is the agent's own private key; it exists so a terminal session sitting next to the delivery file can `source` it and use the `buzz` CLI as the agent. Off by default. The log line names only the path and how many variables were written, never a value.
+- **`webhook` sink**: every POST now carries `system_prompt` (the session's system prompt, verbatim) when the session had one. New config: `webhook.include_system_prompt` (`RELAY_BACKPORT_WEBHOOK_INCLUDE_SYSTEM_PROMPT`, default `true`). Adds roughly 20-40 KB to the request body.
+- **`exec` sink**: the hook's stdin JSON gains `system_prompt` when `exec.include_system_prompt` (`RELAY_BACKPORT_EXEC_INCLUDE_SYSTEM_PROMPT`, default `false`) is on.
+- README: a "What the consumer receives" section, the new config rows, the Buzz Desktop DM caveat (Desktop p-tags every DM participant on every message, so a DM fires a prompt per message even with no `@mention`), and a note on why the system prompt is forwarded verbatim rather than reshaped.
 
 ## 0.2.0 — 2026-09-05
 

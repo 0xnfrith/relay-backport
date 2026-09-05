@@ -29,6 +29,12 @@ export type Delivery = {
   prompt: string;
   /** `_meta.buzz.events[]` as the client sent it, when it did. */
   events?: unknown[];
+  /**
+   * The `session/new` system prompt, verbatim, or "" when the client sent
+   * none. Carried on every delivery in the session so a sink can forward it
+   * without keeping session state of its own. Never logged.
+   */
+  systemPrompt: string;
   /** `BUZZ_RELAY_URL` as injected by the harness, or "". */
   relay: string;
   receivedAt: number;
@@ -112,9 +118,16 @@ export type DeliveryPayload = {
   prompt: string;
   session: SessionInfo;
   events?: unknown[];
+  /** The `session/new` system prompt, verbatim — only when the sink asked for it. */
+  system_prompt?: string;
 };
 
-export function buildPayload(d: Delivery): DeliveryPayload {
+export type BuildPayloadOptions = {
+  /** Include `system_prompt` (verbatim, ~20-40 KB) when the delivery carries one. */
+  includeSystemPrompt?: boolean;
+};
+
+export function buildPayload(d: Delivery, opts: BuildPayloadOptions = {}): DeliveryPayload {
   return {
     source: "buzz",
     transport: "acp",
@@ -133,5 +146,6 @@ export function buildPayload(d: Delivery): DeliveryPayload {
     prompt: d.prompt,
     session: d.session,
     ...(d.events ? { events: d.events } : {}),
+    ...(opts.includeSystemPrompt && d.systemPrompt ? { system_prompt: d.systemPrompt } : {}),
   };
 }

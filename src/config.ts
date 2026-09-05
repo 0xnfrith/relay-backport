@@ -28,13 +28,21 @@ export class ConfigError extends Error {
   readonly exitCode = 1;
 }
 
-export type FileConfig = { path: string };
+export type FileConfig = {
+  path: string;
+  /** Write the session/new system prompt to `<state_dir>/sessions/<id>.system-prompt.md`. Default true. */
+  systemPrompt: boolean;
+  /** When set, (re)write the present Buzz-injected env vars here on every session/new. Default unset (off). */
+  buzzEnvFile?: string;
+};
 
 export type WebhookConfig = {
   url: string;
   bearerFile?: string;
   timeoutMs: number;
   attempts: number;
+  /** Include the session/new system prompt (verbatim) in every POST. Default true. */
+  includeSystemPrompt: boolean;
 };
 
 export type ExecConfig = {
@@ -42,6 +50,8 @@ export type ExecConfig = {
   timeoutMs: number;
   /** Hand the Buzz-injected `BUZZ_*` variables to the hook so it can call the `buzz` CLI. */
   passBuzzEnv: boolean;
+  /** Include the session/new system prompt (verbatim) on stdin. Default false. */
+  includeSystemPrompt: boolean;
 };
 
 export type Config = {
@@ -65,14 +75,15 @@ export type RawConfig = {
   sinks?: string[] | string;
   log_format?: string;
   delivery_wait_ms?: number | string;
-  file?: { path?: string };
+  file?: { path?: string; system_prompt?: boolean | string; buzz_env_file?: string };
   webhook?: {
     url?: string;
     bearer_file?: string;
     timeout_ms?: number | string;
     attempts?: number | string;
+    include_system_prompt?: boolean | string;
   };
-  exec?: { command?: string[] | string; timeout_ms?: number | string; pass_buzz_env?: boolean | string };
+  exec?: { command?: string[] | string; timeout_ms?: number | string; pass_buzz_env?: boolean | string; include_system_prompt?: boolean | string };
 };
 
 export type EnvMap = Record<string, string | undefined>;
@@ -118,26 +129,37 @@ export function rawFromEnv(env: EnvMap): RawConfig {
   const wait = get("DELIVERY_WAIT_MS");
   if (wait) raw.delivery_wait_ms = wait;
   const file = get("FILE");
-  if (file) raw.file = { path: file };
+  const fileSystemPrompt = get("FILE_SYSTEM_PROMPT");
+  const fileBuzzEnvFile = get("FILE_BUZZ_ENV_FILE");
+  if (file || fileSystemPrompt !== undefined || fileBuzzEnvFile) {
+    raw.file = {};
+    if (file) raw.file.path = file;
+    if (fileSystemPrompt !== undefined) raw.file.system_prompt = fileSystemPrompt;
+    if (fileBuzzEnvFile) raw.file.buzz_env_file = fileBuzzEnvFile;
+  }
   const url = get("WEBHOOK_URL");
   const bearer = get("WEBHOOK_BEARER_FILE");
   const timeout = get("WEBHOOK_TIMEOUT_MS");
   const attempts = get("WEBHOOK_ATTEMPTS");
-  if (url || bearer || timeout || attempts) {
+  const webhookIncludeSystemPrompt = get("WEBHOOK_INCLUDE_SYSTEM_PROMPT");
+  if (url || bearer || timeout || attempts || webhookIncludeSystemPrompt !== undefined) {
     raw.webhook = {};
     if (url) raw.webhook.url = url;
     if (bearer) raw.webhook.bearer_file = bearer;
     if (timeout) raw.webhook.timeout_ms = timeout;
     if (attempts) raw.webhook.attempts = attempts;
+    if (webhookIncludeSystemPrompt !== undefined) raw.webhook.include_system_prompt = webhookIncludeSystemPrompt;
   }
   const command = get("EXEC_COMMAND");
   const execTimeout = get("EXEC_TIMEOUT_MS");
   const passBuzz = get("EXEC_PASS_BUZZ_ENV");
-  if (command || execTimeout || passBuzz) {
+  const execIncludeSystemPrompt = get("EXEC_INCLUDE_SYSTEM_PROMPT");
+  if (command || execTimeout || passBuzz || execIncludeSystemPrompt !== undefined) {
     raw.exec = {};
     if (command) raw.exec.command = command;
     if (execTimeout) raw.exec.timeout_ms = execTimeout;
     if (passBuzz) raw.exec.pass_buzz_env = passBuzz;
+    if (execIncludeSystemPrompt !== undefined) raw.exec.include_system_prompt = execIncludeSystemPrompt;
   }
   return raw;
 }
@@ -242,7 +264,11 @@ export function loadConfig(opts: LoadOptions = {}): Config {
 
   let file: FileConfig | undefined;
   if (sinks.includes("file")) {
-    file = { path: resolve(raw.file?.path?.trim() || join(stateDir, DEFAULT_FILE_NAME)) };
+    file = {
+      path: resolve(raw.file?.path?.trim() || join(stateDir, DEFAULT_FILE_NAME)),
+      systemPrompt: toBool(raw.file?.system_prompt, true, "file.system_prompt"),
+      buzzEnvFile: raw.file?.buzz_env_file?.trim() ? resolve(raw.file.buzz_env_file.trim()) : undefined,
+    };
   }
 
   let webhook: WebhookConfig | undefined;
@@ -255,6 +281,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       bearerFile: raw.webhook.bearer_file ? resolve(raw.webhook.bearer_file) : undefined,
       timeoutMs: toInt(raw.webhook.timeout_ms, DEFAULT_WEBHOOK_TIMEOUT_MS, "webhook.timeout_ms", 1),
       attempts: toInt(raw.webhook.attempts, DEFAULT_WEBHOOK_ATTEMPTS, "webhook.attempts", 1),
+      includeSystemPrompt: toBool(raw.webhook.include_system_prompt, true, "webhook.include_system_prompt"),
     };
   }
 
@@ -268,6 +295,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       command,
       timeoutMs: toInt(raw.exec?.timeout_ms, DEFAULT_EXEC_TIMEOUT_MS, "exec.timeout_ms", 1),
       passBuzzEnv: toBool(raw.exec?.pass_buzz_env, false, "exec.pass_buzz_env"),
+      includeSystemPrompt: toBool(raw.exec?.include_system_prompt, false, "exec.include_system_prompt"),
     };
   }
 
@@ -291,9 +319,9 @@ export function describeConfig(cfg: Config): Record<string, unknown> {
     sinks: cfg.sinks,
     delivery_wait_ms: cfg.deliveryWaitMs,
     relay: cfg.relayUrl || null,
-    file: cfg.file ? { path: cfg.file.path } : null,
-    webhook: cfg.webhook ? { url: cfg.webhook.url, bearer: Boolean(cfg.webhook.bearerFile) } : null,
-    exec: cfg.exec ? { command: cfg.exec.command, timeout_ms: cfg.exec.timeoutMs, pass_buzz_env: cfg.exec.passBuzzEnv } : null,
+    file: cfg.file ? { path: cfg.file.path, system_prompt: cfg.file.systemPrompt, buzz_env_file: cfg.file.buzzEnvFile ?? null } : null,
+    webhook: cfg.webhook ? { url: cfg.webhook.url, bearer: Boolean(cfg.webhook.bearerFile), include_system_prompt: cfg.webhook.includeSystemPrompt } : null,
+    exec: cfg.exec ? { command: cfg.exec.command, timeout_ms: cfg.exec.timeoutMs, pass_buzz_env: cfg.exec.passBuzzEnv, include_system_prompt: cfg.exec.includeSystemPrompt } : null,
     config: cfg.configPath ?? null,
   };
 }
