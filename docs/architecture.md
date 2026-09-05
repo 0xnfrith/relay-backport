@@ -19,7 +19,7 @@ sequenceDiagram
   D->>R: REQ membership (44100/44101/9000/9001, #p=self, since)
   D->>R: REQ q-1 (39002 #p=self) → REQ q-2 (39000 #d=…)
   R-->>D: member channels (minus archived)
-  D->>R: REQ watch (kinds, #h=channels, #p=self, since=cursor)
+  D->>R: REQ watch:<channel> per channel (kinds, #h=[one channel], #p=self, since=cursor)
   loop every mention
     R-->>D: EVENT kind:9 (p-tag self)
     D->>D: classify · dedup · allowlist
@@ -35,7 +35,7 @@ sequenceDiagram
     D->>D: persist event id (seen.txt)
   end
   loop every rediscovery_interval
-    D->>R: re-query membership, re-assert REQ watch
+    D->>R: re-query membership, re-assert every REQ watch:<channel>
   end
   loop every heartbeat_seconds
     D->>D: cursor.txt = now

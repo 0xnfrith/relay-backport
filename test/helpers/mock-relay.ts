@@ -16,7 +16,25 @@ export type MockRelayOptions = {
   allowPubkeys?: string[];
   /** Reject every published event with this message. */
   rejectPublish?: string;
+  /**
+   * Emulate a Buzz relay's live routing: a subscription is only pushed
+   * channel-addressed events when its filters resolve to exactly ONE channel.
+   * A REQ whose `#h` names several channels (or none) still replays stored
+   * events and gets its EOSE, but never receives a live push. Off by default.
+   */
+  singleChannelFanOut?: boolean;
 };
+
+/** The channel a REQ resolves to, or undefined when it is not single-channel. */
+function soleChannel(filters: Filter[]): string | undefined {
+  const ids = new Set<string>();
+  for (const f of filters) {
+    const values = (f as Filter & { "#h"?: string[] })["#h"];
+    if (!values || values.length === 0) return undefined;
+    for (const v of values) ids.add(v);
+  }
+  return ids.size === 1 ? [...ids][0] : undefined;
+}
 
 export class MockRelay {
   readonly events: Event[] = [];
@@ -120,11 +138,26 @@ export class MockRelay {
   /** Store and fan out to every live subscription that matches. */
   publish(event: Event): void {
     if (!this.events.includes(event)) this.events.push(event);
+    const channel = event.tags.find((t) => t[0] === "h")?.[1];
     for (const [ws, conn] of this.conns) {
       for (const [id, filters] of conn.subs) {
+        if (this.opts.singleChannelFanOut && channel !== undefined && soleChannel(filters) !== channel) continue;
         if (filters.some((f) => matchFilter(f, event))) ws.send(JSON.stringify(["EVENT", id, event]));
       }
     }
+  }
+
+  /** Drop a live subscription the way a relay does, with a CLOSED reason. */
+  closeSub(id: string, reason: string): void {
+    for (const [ws, conn] of this.conns) {
+      if (!conn.subs.delete(id)) continue;
+      ws.send(JSON.stringify(["CLOSED", id, reason]));
+    }
+  }
+
+  /** Every REQ whose sub id starts with `prefix`. */
+  reqsWithPrefix(prefix: string): Req[] {
+    return this.reqs.filter((r) => r.id.startsWith(prefix));
   }
 
   reqsFor(id: string): Req[] {
