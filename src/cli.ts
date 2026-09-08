@@ -37,6 +37,10 @@ OPTIONS (watch)
   --reactions          react on owner mentions (seen/working)
   --kinds LIST         message kinds to watch (default 9)
   --health-port N      health endpoint port (0 = off)
+  --channels LIST      only watch these channel ids (default: every channel)
+  --observe [HOST:]PORT   live tap page on loopback (0 = off); or OBSERVE_PORT
+  --observe-buffer N   records kept per lane for replay (default 200)
+  --observe-all        also watch observed channels without the mention filter
   --log-format FMT     text | json
   --reset-allowlist    archive an unverifiable allowlist and start empty
   --retry-connect      keep retrying if the first relay connection fails
@@ -62,6 +66,9 @@ const VALUE_FLAGS = new Set([
   "mention-text",
   "kinds",
   "health-port",
+  "observe",
+  "observe-buffer",
+  "channels",
   "log-format",
   "mode",
   "note",
@@ -133,6 +140,20 @@ export function overridesFromFlags(flags: ParsedArgs["flags"]): RawConfig {
   if (flags.reactions === true) o.reactions = true;
   set("kinds", str(flags.kinds));
   set("health_port", str(flags["health-port"]));
+  const observe = str(flags.observe);
+  if (observe !== undefined) {
+    // `--observe PORT` or `--observe HOST:PORT`
+    const at = observe.lastIndexOf(":");
+    if (at > 0) {
+      o.observe_host = observe.slice(0, at);
+      o.observe_port = observe.slice(at + 1);
+    } else {
+      o.observe_port = observe;
+    }
+  }
+  set("observe_buffer", str(flags["observe-buffer"]));
+  if (flags["observe-all"] === true) o.observe_all = true;
+  set("channels", str(flags.channels));
   set("log_format", str(flags["log-format"]));
   return o;
 }

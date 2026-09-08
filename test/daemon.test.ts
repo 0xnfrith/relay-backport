@@ -482,3 +482,130 @@ describe("daemon end to end", () => {
     expect((await fetch(`http://127.0.0.1:${h.port}/nope`)).status).toBe(404);
   });
 });
+
+describe("observe tap", () => {
+  /** An ephemeral port the daemon can bind: `observe_port = 0` means "off". */
+  const freePort = (): string => {
+    const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+    const port = probe.port!;
+    probe.stop(true);
+    return String(port);
+  };
+
+  const waitForRecords = async (d: DaemonHandle, n: number, lane?: string) => {
+    for (let i = 0; i < 200; i++) {
+      if ((await records(d, lane)).length >= n) return;
+      await Bun.sleep(25);
+    }
+    throw new Error(`timed out waiting for ${n} observe records`);
+  };
+
+  const records = async (d: DaemonHandle, lane?: string) => {
+    const all = (await (await fetch(`http://127.0.0.1:${d.observePort}/records`)).json()) as {
+      lane: string;
+      verdict: string;
+      reason: string;
+      mention_line: string | null;
+      event: { id: string };
+    }[];
+    return lane ? all.filter((r) => r.lane === lane) : all;
+  };
+
+  test("a delivered mention is tapped with the exact line the sink emitted", async () => {
+    const s = setup();
+    seedMembership(s, [CHANNEL_A]);
+    const d = await s.start({ OBSERVE_PORT: freePort(), CHANNELS: CHANNEL_A });
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1, 5000, "watch sub");
+
+    const m = channelMessage(s.owner.sk, CHANNEL_A, "hello bot", [["p", s.bot.pk]]);
+    s.relay.publish(m);
+    await waitFor(() => mentionLines(s.lines).length === 1, 5000, "MENTION line");
+    await d.awaitIdle();
+
+    const recs = await records(d, "daemon");
+    const delivered = recs.filter((r) => r.verdict === "delivered");
+    expect(delivered).toHaveLength(1);
+    // the page must show byte-for-byte what the consumer received
+    expect(delivered[0]!.mention_line).toBe(mentionLines(s.lines)[0]!);
+    expect(delivered[0]!.event.id).toBe(m.id);
+    expect(delivered[0]!.reason).toBe("allowed by owner");
+  });
+
+  test("a sender who is not on the allowlist is tapped as dropped, with the reason", async () => {
+    const s = setup();
+    seedMembership(s, [CHANNEL_A]);
+    const stranger = keypair();
+    const d = await s.start({ OBSERVE_PORT: freePort(), CHANNELS: CHANNEL_A });
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1, 5000, "watch sub");
+
+    s.relay.publish(channelMessage(stranger.sk, CHANNEL_A, "let me in", [["p", s.bot.pk]]));
+    await waitForRecords(d, 1, "daemon");
+    await d.awaitIdle();
+
+    const recs = await records(d, "daemon");
+    expect(recs.map((r) => r.verdict)).toEqual(["dropped_not_allowed"]);
+    expect(recs[0]!.mention_line).toBeNull();
+    expect(recs[0]!.reason.length).toBeGreaterThan(0);
+    expect(mentionLines(s.lines)).toHaveLength(0);
+  });
+
+  test("without observe_all an unmentioned message never arrives; with it, it is tapped as dropped_not_mentioned", async () => {
+    const s = setup();
+    seedMembership(s, [CHANNEL_A]);
+    const d = await s.start({ OBSERVE_PORT: freePort(), CHANNELS: CHANNEL_A, OBSERVE_ALL: "true" });
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1, 5000, "watch sub");
+
+    // the opt-in filter is the one without `#p` — that is the whole point of it
+    const filters = s.relay.lastReq(WATCH_A)!.filters;
+    expect(filters.some((f) => f["#h"] && !f["#p"] && !f.authors)).toBe(true);
+
+    s.relay.publish(channelMessage(s.owner.sk, CHANNEL_A, "talking to someone else", []));
+    await waitForRecords(d, 1, "daemon");
+    await d.awaitIdle();
+
+    const recs = await records(d, "daemon");
+    expect(recs.map((r) => r.verdict)).toEqual(["dropped_not_mentioned"]);
+    expect(d.snapshot().counters.dropped_not_mentioned).toBe(1);
+    expect(mentionLines(s.lines)).toHaveLength(0);
+  });
+
+  test("channels restricts what is watched even when the key belongs to more", async () => {
+    const s = setup();
+    seedMembership(s, [CHANNEL_A, CHANNEL_B]);
+    const d = await s.start({ CHANNELS: CHANNEL_A });
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1, 5000, "watch sub");
+    expect(d.channels()).toEqual([CHANNEL_A]);
+    expect(s.relay.reqsFor(watchSubId(CHANNEL_B))).toHaveLength(0);
+  });
+
+  test("the harness lane reaches the same page over /ingest", async () => {
+    const s = setup();
+    seedMembership(s, [CHANNEL_A]);
+    const d = await s.start({ OBSERVE_PORT: freePort(), CHANNELS: CHANNEL_A });
+    await waitFor(() => s.relay.reqsFor(WATCH_A).length >= 1, 5000, "watch sub");
+
+    const res = await fetch(`http://127.0.0.1:${d.observePort}/ingest?label=v0.2%20acp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        event_id: "9".repeat(64),
+        author: s.owner.pk,
+        kind: 9,
+        text: "hello",
+        tags: [["h", CHANNEL_A]],
+        prompt: "<base>…</base>",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const recs = await records(d, "harness");
+    expect(recs).toHaveLength(1);
+    expect(recs[0]!.verdict).toBe("delivered");
+  });
+
+  test("the tap is off unless a port is configured", async () => {
+    const s = setup();
+    seedMembership(s, [CHANNEL_A]);
+    const d = await s.start({ CHANNELS: CHANNEL_A });
+    expect(d.observePort).toBeUndefined();
+  });
+});

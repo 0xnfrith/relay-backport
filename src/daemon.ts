@@ -6,6 +6,7 @@ import { isAllowMode } from "./allowlist";
 import { loadConfig, describeConfig, type Config, type LoadOptions } from "./config";
 import { startControlServer, type ControlRequest, type ControlResponse } from "./control";
 import { startHealthServer, type HealthSnapshot } from "./health";
+import { startObserveServer, type ObserveServer } from "./observe";
 import { parsePubkey } from "./keys";
 import { log, errMessage, registerSecret } from "./log";
 import {
@@ -71,6 +72,7 @@ export type DaemonHandle = {
   snapshot: () => HealthSnapshot;
   controlPort: number;
   healthPort: number | undefined;
+  observePort: number | undefined;
   /** Test seams. */
   channels: () => string[];
   relay: () => RelayClient | undefined;
@@ -105,6 +107,7 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
     dropped_self: 0,
     dropped_duplicate: 0,
     dropped_kind: 0,
+    dropped_not_mentioned: 0,
     reconnects: 0,
   };
   let lastEventAt: number | null = null;
@@ -224,10 +227,24 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
     });
   }
 
+  // --- observe tap ---------------------------------------------------------
+  let observe: ObserveServer | undefined;
+  if (cfg.observePort > 0) {
+    observe = startObserveServer({
+      host: cfg.observeHost,
+      port: cfg.observePort,
+      buffer: cfg.observeBuffer,
+      daemonInfo: {
+        label: `relay-backport ${VERSION} watch`,
+        detail: `${cfg.configPath ?? "no config file"} · observe_all=${cfg.observeAll}`,
+      },
+    });
+  }
+
   // --- reload ------------------------------------------------------------
   function applyReload(next: Config): string[] {
     const changed: string[] = [];
-    const fixed: (keyof Config)[] = ["relayUrl", "pubkey", "stateDir", "controlPort", "healthPort"];
+    const fixed: (keyof Config)[] = ["relayUrl", "pubkey", "stateDir", "controlPort", "healthPort", "observePort", "observeHost"];
     for (const key of fixed) {
       if (JSON.stringify(next[key]) !== JSON.stringify(cfg[key])) {
         log.warn("reload: change requires a restart, ignored", { key });
@@ -331,6 +348,12 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
         since,
       });
     }
+    if (cfg.observeAll) {
+      // Everything in the channel, mention or not. Without this the `#p` filters
+      // above mean an unmentioned message never reaches us to be classified, so
+      // `dropped_not_mentioned` can never fire. Costs relay traffic: opt-in only.
+      filters.push({ kinds: cfg.kinds, "#h": [channel], since });
+    }
     return filters;
   }
 
@@ -413,7 +436,16 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
       }
       metas = res.events;
     }
-    const next = mergeDiscoveredChannels(members.events, metas);
+    let next = mergeDiscoveredChannels(members.events, metas);
+    if (cfg.channels.length > 0) {
+      // A second daemon on the same key competes for the relay's per-principal
+      // REQ quota, so an observing run restricts itself to the channels it is
+      // actually watching rather than every channel the key belongs to.
+      const wanted = new Set(cfg.channels);
+      const before = next.length;
+      next = next.filter((id) => wanted.has(id.toLowerCase()));
+      log.debug("channel restriction applied", { discovered: before, watching: next.length });
+    }
     const changed = next.length !== channels.length || next.some((id) => !channels.includes(id));
     if (changed) {
       log.info("discovered channels", { count: next.length, added: next.filter((c) => !channels.includes(c)).length });
@@ -451,6 +483,7 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
     const c = classify(ev, { selfPubkey: cfg.pubkey, ownerPubkey: cfg.ownerPubkey, mentionText: cfg.mentionText });
     if (c.fromSelf) {
       counters.dropped_self++;
+      observe?.record({ lane: "daemon", verdict: "dropped_self", reason: "authored by this key", event: ev });
       if (cfg.reactions && (ev.kind === KIND_CHANNEL_MESSAGE || ev.kind === KIND_FORUM_REPLY) && c.channel) {
         const cleared = await reactions.onOwnReply(c.channel);
         if (cleared) log.debug("cleared reactions after own reply", { channel: c.channel, cleared });
@@ -459,20 +492,34 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
     }
     if (isEphemeralKind(ev.kind) || !cfg.kinds.includes(ev.kind)) {
       counters.dropped_kind++;
+      observe?.record({
+        lane: "daemon",
+        verdict: "dropped_kind",
+        reason: isEphemeralKind(ev.kind) ? "ephemeral kind" : `kind ${ev.kind} not in kinds`,
+        event: ev,
+      });
       return;
     }
     if (seen.has(ev.id)) {
       counters.dropped_duplicate++;
+      observe?.record({ lane: "daemon", verdict: "dropped_duplicate", reason: "already seen", event: ev });
       return;
     }
     seen.markInMemory(ev.id);
     const mentioned = c.ptag || c.text;
-    if (!mentioned) return;
+    if (!mentioned) {
+      // Reached only when a filter without `#p` is installed (observe_all, or
+      // a mention_text filter): a `#p`-scoped REQ never delivers these at all.
+      counters.dropped_not_mentioned++;
+      observe?.record({ lane: "daemon", verdict: "dropped_not_mentioned", reason: "no p-tag and no mention text", event: ev });
+      return;
+    }
     counters.mentions++;
 
     const decision = state.allowlist.decide(ev.pubkey, { ptag: c.ptag, text: c.text });
     if (!decision.allowed) {
       counters.dropped_not_allowed++;
+      observe?.record({ lane: "daemon", verdict: "dropped_not_allowed", reason: decision.reason ?? "sender not allowed", event: ev });
       log.info("mention dropped: sender not allowed", {
         from: ev.pubkey.slice(0, 8),
         reason: decision.reason,
@@ -512,6 +559,13 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
     if (results.every(Boolean)) {
       counters.delivered++;
       seen.persist(record.event.id);
+      observe?.record({
+        lane: "daemon",
+        verdict: "delivered",
+        reason: `allowed by ${record.allowedBy}`,
+        event: record.event,
+        emitted: true,
+      });
       log.info("mention delivered", {
         event: record.event.id,
         from: record.event.pubkey.slice(0, 8),
@@ -521,6 +575,13 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
       });
     } else {
       counters.delivery_failed++;
+      observe?.record({
+        lane: "daemon",
+        verdict: "delivery_failed",
+        reason: sinks.filter((_, i) => !results[i]).map((s) => s.name).join(", ") + " failed",
+        event: record.event,
+        emitted: true,
+      });
       log.warn("mention not fully delivered", {
         event: record.event.id,
         failed: sinks.filter((_, i) => !results[i]).map((s) => s.name),
@@ -671,6 +732,7 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
       }
     }
     health?.stop();
+    observe?.stop();
     control.stop();
     removeControlFiles(state.paths);
     log.info("stopped", { code: exitCode });
@@ -687,6 +749,7 @@ export async function startDaemon(initial: Config, opts: DaemonOptions = {}): Pr
     snapshot: () => ({ ...snapshot(), control_port: control.port }),
     controlPort: control.port,
     healthPort: health?.port,
+    observePort: observe?.port,
     channels: () => [...channels],
     relay: () => relay,
     awaitIdle: async () => {

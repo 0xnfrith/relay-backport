@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { ConfigError, describeConfig, loadConfig, wsUrl } from "../src/config";
+import { ConfigError, describeConfig, loadConfig, wsUrl, type RawConfig } from "../src/config";
+import { overridesFromFlags } from "../src/cli";
 import { clearSecrets, configureLog, redact } from "../src/log";
 import { keypair } from "./helpers/mock-relay";
 import { nip19 } from "nostr-tools";
@@ -128,5 +129,63 @@ describe("config loading", () => {
     const cfg = loadConfig({ env: { STATE_DIR: "/tmp/x", CONTROL_PORT: "1234" }, readFile, clientOnly: true });
     expect(cfg.controlPort).toBe(1234);
     expect(cfg.stateDir.endsWith("x")).toBe(true);
+  });
+});
+
+describe("observe tap config", () => {
+  const baseEnv = () => ({ RELAY_URL: "wss://relay.example", PRIVATE_KEY_FILE: "/keys/bot.hex" });
+  const load = (env: Record<string, string>, overrides?: RawConfig) => loadConfig({ env, overrides, readFile });
+
+  test("defaults leave the tap off", () => {
+    const cfg = load(baseEnv());
+    expect(cfg.observePort).toBe(0);
+    expect(cfg.observeHost).toBe("127.0.0.1");
+    expect(cfg.observeBuffer).toBe(200);
+    expect(cfg.observeAll).toBe(false);
+    expect(cfg.channels).toEqual([]);
+  });
+
+  test("env sets port, host, buffer, observe_all and channels", () => {
+    const cfg = load({
+        ...baseEnv(),
+        OBSERVE_PORT: "7479",
+        OBSERVE_HOST: "127.0.0.2",
+        OBSERVE_BUFFER: "50",
+        OBSERVE_ALL: "true",
+        CHANNELS: "AAA-111,bbb-222",
+    });
+    expect(cfg.observePort).toBe(7479);
+    expect(cfg.observeHost).toBe("127.0.0.2");
+    expect(cfg.observeBuffer).toBe(50);
+    expect(cfg.observeAll).toBe(true);
+    // channel ids are compared lowercase against discovery
+    expect(cfg.channels).toEqual(["aaa-111", "bbb-222"]);
+  });
+
+  test("--observe accepts a bare port and a host:port pair", () => {
+    expect(overridesFromFlags({ observe: "7479" })).toMatchObject({ observe_port: "7479" });
+    expect(overridesFromFlags({ observe: "127.0.0.9:7479" })).toMatchObject({
+      observe_host: "127.0.0.9",
+      observe_port: "7479",
+    });
+  });
+
+  test("a flag beats the environment", () => {
+    const cfg = load({ ...baseEnv(), OBSERVE_PORT: "7479" }, overridesFromFlags({ observe: "7500", "observe-all": true }));
+    expect(cfg.observePort).toBe(7500);
+    expect(cfg.observeAll).toBe(true);
+  });
+
+  test("out-of-range values are refused", () => {
+    expect(() => load({ ...baseEnv(), OBSERVE_PORT: "70000" })).toThrow(/observe_port/);
+    expect(() => load({ ...baseEnv(), OBSERVE_BUFFER: "0" })).toThrow(/observe_buffer/);
+  });
+
+  test("describeConfig reports the tap without inventing one when it is off", () => {
+    expect(describeConfig(load(baseEnv()))).toMatchObject({ observe: null, channels: "all" });
+    expect(describeConfig(load({ ...baseEnv(), OBSERVE_PORT: "7479", CHANNELS: "c1" }))).toMatchObject({
+      observe: "127.0.0.1:7479",
+      channels: ["c1"],
+    });
   });
 });

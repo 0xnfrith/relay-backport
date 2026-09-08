@@ -232,6 +232,29 @@ CLI flags for `watch`: `--config`, `--relay`, `--key-file`, `--state-dir`, `--ow
   "reactions": { "enabled": false, "pending": 0 }, "control_port": 7477 }
 ```
 
+## Observing what the daemon sees
+
+`observe_port` starts a page on loopback that mirrors, live, every event this daemon receives and what it decided to do with it — for context-engineering the thing downstream of it.
+
+```sh
+relay-backport watch --config ./relay-backport.toml --observe 7479
+# then open http://127.0.0.1:7479
+```
+
+Each record shows the raw event JSON, a verdict chip with its reason, the `MENTION|{…}` line exactly as the sinks emitted it (or nothing, when the event was dropped), the channel and thread root, and `delta_ms` — how long the event took to reach you after it was created. Records stream over SSE and the last `observe_buffer` of them replay when the page opens, so a reload loses nothing.
+
+The verdicts are the exits of the mention pipeline: `delivered`, `delivery_failed`, `dropped_self`, `dropped_kind`, `dropped_duplicate`, `dropped_not_allowed`, and `dropped_not_mentioned`.
+
+**`dropped_not_mentioned` needs `observe_all`.** The watch subscriptions are scoped by `#p`, so a message that does not mention this key is never delivered to the daemon and cannot be dropped by it. Setting `observe_all = true` adds a channel-wide filter for the configured `channels` so those messages arrive and are shown. It is off by default because it is a real increase in relay traffic.
+
+**Comparing two paths.** The page has a second column fed by `POST /ingest`, which takes the JSON payload the `webhook` sink sends. Point a harness-mode instance's webhook sink at it and the two columns show the same mention as each path sees it — the left one every event and every verdict, the right one the prompt a harness built:
+
+```sh
+RELAY_BACKPORT_SINKS=webhook RELAY_BACKPORT_WEBHOOK_URL='http://127.0.0.1:7479/ingest?label=harness'   relay-backport acp
+```
+
+Loopback only, no authentication, no persistence: it mirrors traffic the operator already receives. Do not bind it to a routable address.
+
 ## Sinks
 
 - **`stdout`** — the Claude Code Monitor contract above. Nothing else is ever written to stdout.
