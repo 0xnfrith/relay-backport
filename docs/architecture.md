@@ -1,6 +1,6 @@
 # Architecture
 
-`architecture.png` / `architecture.svg` in this directory are the hand-drawn (Excalidraw) export of the **v0.1** diagram — the standalone daemon that v0.2 removed. They will be re-exported; until then the Mermaid in the README and the sequence view below are the reference.
+`architecture.png` / `architecture.svg` in this directory are the hand-drawn (Excalidraw) export of the **v0.2** diagram — the Buzz harness (`buzz-acp`, Desktop-managed or headless) spawning `relay-backport acp` over stdio, which delivers to the `file` / `webhook` / `exec` sinks. The Mermaid in the README and the sequence view below stay the always-rendering reference; the export is the polished, hand-arranged version.
 
 ## Data flow
 
