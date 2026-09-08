@@ -243,6 +243,8 @@ relay-backport watch --config ./relay-backport.toml --observe 7479
 
 Each record shows the raw event JSON, a verdict chip with its reason, the `MENTION|{…}` line exactly as the sinks emitted it (or nothing, when the event was dropped), the channel and thread root, and `delta_ms` — how long the event took to reach you after it was created. Records stream over SSE and the last `observe_buffer` of them replay when the page opens, so a reload loses nothing.
 
+On startup the daemon replays a short window of recent events, so a restart within that window re-shows events you have already seen — with a large `delta_ms`, which is how you tell a replay from something that just arrived. A fresh `state_dir` has an empty `seen.txt`, so nothing is deduplicated against a previous run.
+
 The verdicts are the exits of the mention pipeline: `delivered`, `delivery_failed`, `dropped_self`, `dropped_kind`, `dropped_duplicate`, `dropped_not_allowed`, and `dropped_not_mentioned`.
 
 **`dropped_not_mentioned` needs `observe_all`.** The watch subscriptions are scoped by `#p`, so a message that does not mention this key is never delivered to the daemon and cannot be dropped by it. Setting `observe_all = true` adds a channel-wide filter for the configured `channels` so those messages arrive and are shown. It is off by default because it is a real increase in relay traffic.
