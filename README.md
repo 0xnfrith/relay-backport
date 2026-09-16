@@ -70,7 +70,9 @@ bun run src/cli.ts acp --config deploy/relay-backport.example.toml
    MENTION|{"kind":9,"from":"1a2b3c4d","h":"<channel uuid>","content":"…","id":"<event id>","tags":[["h","…"],["p","…"]]}
    ```
 
-   `from` is the first 8 hex chars of the sender (`unknown` when the prompt carried no sender), `content` is capped at 400 characters, `rootId` is added for forum replies (kind 45003). Session lifecycle shows up as `EVENT|session|new|<id>` (or `EVENT|session|new|<id>|<path>` when the system prompt was written to disk — `file.system_prompt`, on by default), `EVENT|session|cancel|<id>`, `EVENT|acp|closed`. `tail` starts at the end of the file (`--lines N` replays the last N first; `--no-follow` prints and exits) and keeps following across truncation, rotation and a file that does not exist yet. Read the system prompt file once at the head of the session — see [What the consumer receives](#what-the-consumer-receives).
+   `from` is the first 8 hex chars of the sender (`unknown` when the prompt carried no sender), `content` is capped at 400 characters, `rootId` is added for forum replies (kind 45003). Session lifecycle shows up as `EVENT|session|new|<id>` (or `EVENT|session|new|<id>|<path>` when the system prompt was written to disk — `file.system_prompt`, on by default), `EVENT|session|cancel|<id>`, `EVENT|acp|closed`. `tail` keeps following across truncation, rotation and a file that does not exist yet, and `--no-follow` prints and exits.
+
+   **The tail keeps a line cursor, so a restart does not lose mentions.** `tail` records the number of lines it has handed over in `<state_dir>/tail.cursor` (`--cursor PATH` to move it), advancing it after every line, and on start it resumes from that number: the lines written while the tail was down are replayed, behind one `EVENT|catchup|N line(s) written while the tail was down` line so the consumer can see the gap for what it is. A cold start with no cursor replays the whole file; a file with fewer lines than the cursor claims has rotated, and replays from the top. A file that merely goes missing for a moment does not — the cursor survives, and when the file comes back the tail places itself against it again. The delivery file is a queue, and a supervisor restart is not a reason to drop the mentions that arrived during it. `--no-cursor` restores the pre-0.3 behaviour — follow from the end, keep nothing — and is the only mode in which `--lines N` applies. Read the system prompt file once at the head of the session — see [What the consumer receives](#what-the-consumer-receives).
 
 What Buzz does for you in this mode: it holds the relay socket and the key, discovers channels, applies its respond-to gate, resolves the session scope (channel or thread), fetches thread context and memory, frames the prompt, and shows every prompt in the agent's *Prompt context* panel. relay-backport receives that prompt, whole, and delivers it.
 
@@ -227,6 +229,7 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `sinks` | `RELAY_BACKPORT_SINKS` | `file` | `file`, `webhook`, `exec` — several at once |
 | `delivery_wait_ms` | `RELAY_BACKPORT_DELIVERY_WAIT_MS` | `15000` | How long a turn waits for the sinks before ending anyway |
 | `log_format` | `RELAY_BACKPORT_LOG_FORMAT` | `text` | `text` or `json`, on stderr |
+| `tail` cursor | *(CLI only: `--cursor`)* | `<state_dir>/tail.cursor` | Lines `tail` has already delivered; `--no-cursor` turns it off |
 | `file.path` | `RELAY_BACKPORT_FILE` | `<state_dir>/deliveries.jsonl` | The file the `file` sink appends to and `tail` follows |
 | `file.system_prompt` | `RELAY_BACKPORT_FILE_SYSTEM_PROMPT` | `true` | Write the session's system prompt to `<state_dir>/sessions/<id>.system-prompt.md` once, and name it in the `EVENT|session|new|…` line |
 | `file.buzz_env_file` | `RELAY_BACKPORT_FILE_BUZZ_ENV_FILE` | — (off) | Path to (re)write the present `BUZZ_RELAY_URL` / `BUZZ_PRIVATE_KEY` / `BUZZ_AUTH_TAG` to, on every `session/new` — holds the agent's private key; see [Security notes](#security-notes) |
@@ -242,7 +245,7 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 
 Buzz's own variables (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, …) are not configuration for relay-backport: `BUZZ_RELAY_URL` is copied into payloads as `relay`, the key and any API token are registered with the log redactor at startup, and none of them is read otherwise.
 
-CLI: `relay-backport run [--config PATH] [--dry-run] [--observe]` · `relay-backport [acp] [--config PATH] [--sink NAME]… [--file PATH] [--state-dir PATH] [--log-format FMT] [--verbose]` · `relay-backport tail [--file PATH] [--lines N] [--no-follow] [--config PATH]` · `relay-backport observe [--port N] [--buffer N] [--bind ADDR]` · `--help` · `--version`. Exit codes: `0` ok, `1` configuration or usage.
+CLI: `relay-backport run [--config PATH] [--dry-run] [--observe]` · `relay-backport [acp] [--config PATH] [--sink NAME]… [--file PATH] [--state-dir PATH] [--log-format FMT] [--verbose]` · `relay-backport tail [--file PATH] [--cursor PATH | --no-cursor] [--lines N] [--no-follow] [--config PATH]` · `relay-backport observe [--port N] [--buffer N] [--bind ADDR]` · `--help` · `--version`. Exit codes: `0` ok, `1` configuration or usage.
 
 ## Sinks
 

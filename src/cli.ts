@@ -10,13 +10,14 @@
 //
 // Exit codes: 0 ok · 1 config or usage
 import { lines, startAcpServer } from "./acp-server";
-import { ConfigError, describeConfig, loadConfig, type RawConfig } from "./config";
+import { ConfigError, DEFAULT_TAIL_CURSOR_NAME, describeConfig, loadConfig, type RawConfig } from "./config";
 import { configureLog, log, errMessage } from "./log";
 import { DEFAULT_BIND, DEFAULT_BUFFER, DEFAULT_PORT, startObserveServer } from "./observe";
 import { buildSinks } from "./sinks/index";
 import { buildPlan, pgrepSessionTitle, preflight, probeUrl, renderPlan, runHarness } from "./run";
 import { tailFile } from "./tail";
 import { NAME, VERSION } from "./version";
+import { join, resolve } from "node:path";
 
 export const HELP = `${NAME} ${VERSION}
 An ACP harness that hands Buzz mentions to tools with no Buzz integration.
@@ -47,7 +48,10 @@ OPTIONS (run)
   never a command line, never a log line, never the printed plan.
 
 OPTIONS (tail)
-  --lines N            print the last N lines before following (default 0)
+  --cursor PATH        the line cursor (default STATE_DIR/${DEFAULT_TAIL_CURSOR_NAME}); on by default, so a
+                       restart replays the lines written while the tail was down
+  --no-cursor          no cursor: follow from the end of the file, as before 0.3
+  --lines N            print the last N lines before following (--no-cursor only; default 0)
   --no-follow          print and exit
 
 OPTIONS (observe)
@@ -67,8 +71,8 @@ export type ParsedArgs = {
   flags: Record<string, string | boolean | string[]>;
 };
 
-const VALUE_FLAGS = new Set(["config", "state-dir", "file", "sink", "log-format", "lines", "port", "buffer", "bind"]);
-const BOOL_FLAGS = new Set(["help", "version", "verbose", "no-follow", "dry-run", "observe"]);
+const VALUE_FLAGS = new Set(["config", "state-dir", "file", "sink", "log-format", "lines", "cursor", "port", "buffer", "bind"]);
+const BOOL_FLAGS = new Set(["help", "version", "verbose", "no-follow", "no-cursor", "dry-run", "observe"]);
 const REPEATABLE = new Set(["sink"]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -244,8 +248,22 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
         configureLog({ format: cfg.logFormat, level: args.flags.verbose === true ? "debug" : "info" });
         const n = Number.parseInt(str(args.flags.lines) ?? "0", 10);
         if (!Number.isFinite(n) || n < 0) throw new ConfigError("--lines must be an integer >= 0");
-        log.info("following", { path: cfg.file!.path, lines: n });
-        await tailFile({ path: cfg.file!.path, write: (l) => io.out(l), lines: n, follow: args.flags["no-follow"] !== true, signal: io.signal });
+        const noCursor = args.flags["no-cursor"] === true;
+        const cursorFlag = str(args.flags.cursor);
+        if (noCursor && cursorFlag !== undefined) throw new ConfigError("--cursor and --no-cursor cannot be combined");
+        if (!noCursor && n > 0) {
+          throw new ConfigError("--lines applies to --no-cursor tailing; with a cursor, the cursor decides where the tail starts");
+        }
+        const cursorPath = noCursor ? undefined : resolve(cursorFlag ?? join(cfg.stateDir, DEFAULT_TAIL_CURSOR_NAME));
+        log.info("following", { path: cfg.file!.path, cursor: cursorPath ?? null, lines: n });
+        await tailFile({
+          path: cfg.file!.path,
+          write: (l) => io.out(l),
+          lines: n,
+          follow: args.flags["no-follow"] !== true,
+          cursorPath,
+          signal: io.signal,
+        });
         return 0;
       }
       case "observe": {
