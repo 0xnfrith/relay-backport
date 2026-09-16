@@ -51,7 +51,7 @@ export function buildSinks(cfg: Config, opts: SinkFactoryOptions = {}): Sink[] {
         break;
       case "webhook":
         if (!cfg.webhook) throw new Error("webhook sink selected without webhook config");
-        sinks.push(new WebhookSink(cfg.webhook, opts.readFile));
+        sinks.push(new WebhookSink(cfg.webhook, opts.readFile, { stateDir: cfg.stateDir }));
         break;
       case "exec":
         if (!cfg.exec) throw new Error("exec sink selected without exec config");

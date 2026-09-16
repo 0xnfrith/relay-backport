@@ -120,11 +120,23 @@ export type DeliveryPayload = {
   events?: unknown[];
   /** The `session/new` system prompt, verbatim — only when the sink asked for it. */
   system_prompt?: string;
+  /**
+   * Every `<thread-context>` block this ACP session has carried, oldest first,
+   * for a receiver that keeps no state of its own. Only in `cumulative` mode;
+   * absent in the default `delta` mode, which leaves the payload byte-identical
+   * to 0.2.x. `prompt` is never rewritten — this is additive.
+   */
+  thread_context_cumulative?: string;
+  /** True when the bound dropped the oldest blocks from `thread_context_cumulative`. */
+  thread_context_truncated?: boolean;
 };
 
 export type BuildPayloadOptions = {
   /** Include `system_prompt` (verbatim, ~20-40 KB) when the delivery carries one. */
   includeSystemPrompt?: boolean;
+  /** The accumulated thread context, when the sink is in `cumulative` mode. */
+  threadContextCumulative?: string;
+  threadContextTruncated?: boolean;
 };
 
 export function buildPayload(d: Delivery, opts: BuildPayloadOptions = {}): DeliveryPayload {
@@ -147,5 +159,8 @@ export function buildPayload(d: Delivery, opts: BuildPayloadOptions = {}): Deliv
     session: d.session,
     ...(d.events ? { events: d.events } : {}),
     ...(opts.includeSystemPrompt && d.systemPrompt ? { system_prompt: d.systemPrompt } : {}),
+    ...(opts.threadContextCumulative
+      ? { thread_context_cumulative: opts.threadContextCumulative, ...(opts.threadContextTruncated ? { thread_context_truncated: true } : {}) }
+      : {}),
   };
 }

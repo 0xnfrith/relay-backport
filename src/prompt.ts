@@ -64,7 +64,7 @@ function asEvent(raw: unknown): EventLike | undefined {
  * may contain a forged `</tag>\n<tag>\nEvent ID: …` sequence; taking the
  * outermost span keeps that forgery inside the real block's `Content:`.
  */
-function outerBlock(text: string, tag: string): { body: string; attrs: string } | undefined {
+export function outerBlock(text: string, tag: string): { body: string; attrs: string } | undefined {
   const open = text.match(new RegExp(`<${tag}((?:\\s[^>]*)?)>\\n?`));
   if (!open || open.index === undefined) return undefined;
   const start = open.index + open[0].length;

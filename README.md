@@ -109,11 +109,23 @@ Each prompt is a JSON POST; the receiver must be idempotent on `event_id` (deliv
   "prompt": "<the whole ACP prompt, verbatim>",
   "session": { "id": "<acp session id>", "cwd": "…", "title": "… (when the harness named it)" },
   "events": [ "… _meta.buzz.events[] as the harness sent it, when it did" ],
-  "system_prompt": "<the session's session/new system prompt, verbatim — only when webhook.include_system_prompt is true and the session had one>"
+  "system_prompt": "<the session's session/new system prompt, verbatim — only when webhook.include_system_prompt is true and the session had one>",
+  "thread_context_cumulative": "<every thread-context block this session has carried, oldest first — only in cumulative mode>",
+  "thread_context_truncated": true
 }
 ```
 
 Retries: network errors, `429` and `5xx` are retried with backoff up to `webhook.attempts` (default 3); `4xx` is final; a timeout is final because the server may already have acted.
+
+### Stateless receivers: `webhook.thread_context`
+
+`buzz-acp` builds a thread's history **once per session**. The first prompt of a thread carries it in a `<thread-context>` block; every later prompt in that session is told, in prose, that "Earlier thread context was already delivered in this session". That is right for a long-lived agent process holding a conversation, and exactly wrong for a webhook: your handler gets the history on the first request and a bare delta on every one after it, with no way to ask for the rest.
+
+So relay-backport can keep the ledger your receiver does not have. Set `webhook.thread_context = "cumulative"` (`RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT`) and every POST carries **`thread_context_cumulative`**: every context block the ACP session has seen, oldest first, including this turn's. It is bounded by `webhook.cumulative_max_chars` (default 32000); over the bound, whole blocks are dropped from the oldest end and the payload carries `"thread_context_truncated": true`.
+
+It is a **new field, not a rewritten prompt**. `prompt` stays exactly what the harness built — it is what the observe page renders verbatim and derives its per-session token estimate from, and prepending history there would silently double-count it. A receiver that wants the old behaviour changes nothing: `delta` is the default, and in `delta` mode the payload is byte-identical to 0.2.x.
+
+The ledger lives in memory and is appended to `<state_dir>/sessions/<session id>.context.jsonl` (0600, one JSON object per line), so a relay-backport restart inside a live session keeps what it already forwarded. It is a durability nicety, never a delivery gate: a ledger that cannot be written costs a restart's worth of history, not a mention. The `exec` sink is unchanged — this is a webhook-scoped setting.
 
 ## The exec case
 
@@ -197,6 +209,8 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `file.path` | `RELAY_BACKPORT_FILE` | `<state_dir>/deliveries.jsonl` | The file the `file` sink appends to and `tail` follows |
 | `file.system_prompt` | `RELAY_BACKPORT_FILE_SYSTEM_PROMPT` | `true` | Write the session's system prompt to `<state_dir>/sessions/<id>.system-prompt.md` once, and name it in the `EVENT|session|new|…` line |
 | `file.buzz_env_file` | `RELAY_BACKPORT_FILE_BUZZ_ENV_FILE` | — (off) | Path to (re)write the present `BUZZ_RELAY_URL` / `BUZZ_PRIVATE_KEY` / `BUZZ_AUTH_TAG` to, on every `session/new` — holds the agent's private key; see [Security notes](#security-notes) |
+| `webhook.thread_context` | `RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT` | `delta` | `cumulative` also carries every thread-context block the session has seen |
+| `webhook.cumulative_max_chars` | `RELAY_BACKPORT_WEBHOOK_CUMULATIVE_MAX_CHARS` | `32000` | Bound on `thread_context_cumulative`; oldest blocks dropped first |
 | `webhook.url` | `RELAY_BACKPORT_WEBHOOK_URL` | — | Required for the webhook sink |
 | `webhook.bearer_file` | `RELAY_BACKPORT_WEBHOOK_BEARER_FILE` | — | File holding a bearer token sent as `Authorization: Bearer …`; never logged |
 | `webhook.timeout_ms` | `RELAY_BACKPORT_WEBHOOK_TIMEOUT_MS` | `8000` | Per-attempt timeout |

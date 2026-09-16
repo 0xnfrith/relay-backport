@@ -20,6 +20,7 @@ export const DEFAULT_WEBHOOK_TIMEOUT_MS = 8000;
 export const DEFAULT_WEBHOOK_ATTEMPTS = 3;
 export const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 export const DEFAULT_DELIVERY_WAIT_MS = 15_000;
+export const DEFAULT_CUMULATIVE_MAX_CHARS = 32_000;
 
 /** Environment variables Buzz injects into a harness that must never reach a log line. */
 export const BUZZ_SECRET_ENV = ["BUZZ_PRIVATE_KEY", "BUZZ_ACP_PRIVATE_KEY", "NOSTR_PRIVATE_KEY", "BUZZ_API_TOKEN", "BUZZ_ACP_API_TOKEN", "BUZZ_AUTH_TAG"];
@@ -43,6 +44,14 @@ export type WebhookConfig = {
   attempts: number;
   /** Include the session/new system prompt (verbatim) in every POST. Default true. */
   includeSystemPrompt: boolean;
+  /**
+   * `delta` (default, and 0.2.x behaviour): POST the prompt as the harness
+   * built it. `cumulative`: also carry every `<thread-context>` block the
+   * session has seen, for a receiver that keeps no state.
+   */
+  threadContext: "delta" | "cumulative";
+  /** Bound on `thread_context_cumulative`; oldest blocks are dropped first. */
+  cumulativeMaxChars: number;
 };
 
 export type ExecConfig = {
@@ -82,6 +91,8 @@ export type RawConfig = {
     timeout_ms?: number | string;
     attempts?: number | string;
     include_system_prompt?: boolean | string;
+    thread_context?: string;
+    cumulative_max_chars?: number | string;
   };
   exec?: { command?: string[] | string; timeout_ms?: number | string; pass_buzz_env?: boolean | string; include_system_prompt?: boolean | string };
 };
@@ -142,13 +153,17 @@ export function rawFromEnv(env: EnvMap): RawConfig {
   const timeout = get("WEBHOOK_TIMEOUT_MS");
   const attempts = get("WEBHOOK_ATTEMPTS");
   const webhookIncludeSystemPrompt = get("WEBHOOK_INCLUDE_SYSTEM_PROMPT");
-  if (url || bearer || timeout || attempts || webhookIncludeSystemPrompt !== undefined) {
+  const webhookThreadContext = get("WEBHOOK_THREAD_CONTEXT");
+  const webhookCumulativeMax = get("WEBHOOK_CUMULATIVE_MAX_CHARS");
+  if (url || bearer || timeout || attempts || webhookIncludeSystemPrompt !== undefined || webhookThreadContext || webhookCumulativeMax) {
     raw.webhook = {};
     if (url) raw.webhook.url = url;
     if (bearer) raw.webhook.bearer_file = bearer;
     if (timeout) raw.webhook.timeout_ms = timeout;
     if (attempts) raw.webhook.attempts = attempts;
     if (webhookIncludeSystemPrompt !== undefined) raw.webhook.include_system_prompt = webhookIncludeSystemPrompt;
+    if (webhookThreadContext) raw.webhook.thread_context = webhookThreadContext;
+    if (webhookCumulativeMax) raw.webhook.cumulative_max_chars = webhookCumulativeMax;
   }
   const command = get("EXEC_COMMAND");
   const execTimeout = get("EXEC_TIMEOUT_MS");
@@ -203,6 +218,12 @@ function toCommand(v: string[] | string | undefined): string[] | undefined {
   if (v === undefined) return undefined;
   if (Array.isArray(v)) return v.map(String).filter((s) => s.length > 0);
   return v.split(/\s+/).filter(Boolean);
+}
+
+function parseThreadContext(v: string | undefined): "delta" | "cumulative" {
+  const s = (v ?? "delta").trim().toLowerCase();
+  if (s === "delta" || s === "cumulative") return s;
+  throw new ConfigError('webhook.thread_context must be "delta" or "cumulative"');
 }
 
 function parseSinks(v: string[] | string | undefined): SinkName[] {
@@ -282,6 +303,8 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       timeoutMs: toInt(raw.webhook.timeout_ms, DEFAULT_WEBHOOK_TIMEOUT_MS, "webhook.timeout_ms", 1),
       attempts: toInt(raw.webhook.attempts, DEFAULT_WEBHOOK_ATTEMPTS, "webhook.attempts", 1),
       includeSystemPrompt: toBool(raw.webhook.include_system_prompt, true, "webhook.include_system_prompt"),
+      threadContext: parseThreadContext(raw.webhook.thread_context),
+      cumulativeMaxChars: toInt(raw.webhook.cumulative_max_chars, DEFAULT_CUMULATIVE_MAX_CHARS, "webhook.cumulative_max_chars", 1),
     };
   }
 
@@ -320,7 +343,15 @@ export function describeConfig(cfg: Config): Record<string, unknown> {
     delivery_wait_ms: cfg.deliveryWaitMs,
     relay: cfg.relayUrl || null,
     file: cfg.file ? { path: cfg.file.path, system_prompt: cfg.file.systemPrompt, buzz_env_file: cfg.file.buzzEnvFile ?? null } : null,
-    webhook: cfg.webhook ? { url: cfg.webhook.url, bearer: Boolean(cfg.webhook.bearerFile), include_system_prompt: cfg.webhook.includeSystemPrompt } : null,
+    webhook: cfg.webhook
+      ? {
+          url: cfg.webhook.url,
+          bearer: Boolean(cfg.webhook.bearerFile),
+          include_system_prompt: cfg.webhook.includeSystemPrompt,
+          thread_context: cfg.webhook.threadContext,
+          cumulative_max_chars: cfg.webhook.cumulativeMaxChars,
+        }
+      : null,
     exec: cfg.exec ? { command: cfg.exec.command, timeout_ms: cfg.exec.timeoutMs, pass_buzz_env: cfg.exec.passBuzzEnv, include_system_prompt: cfg.exec.includeSystemPrompt } : null,
     config: cfg.configPath ?? null,
   };

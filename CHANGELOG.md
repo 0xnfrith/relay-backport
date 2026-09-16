@@ -2,6 +2,20 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.3.0 — unreleased
+
+### Added
+
+- **`webhook.thread_context = "delta" | "cumulative"`** (`RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT`, default `delta`) and **`webhook.cumulative_max_chars`** (`RELAY_BACKPORT_WEBHOOK_CUMULATIVE_MAX_CHARS`, default `32000`). In `cumulative` mode every POST carries a new field, **`thread_context_cumulative`**: every `<thread-context>` (or `<conversation-context>`) block the ACP session has seen, oldest first, including the current turn's. Over the bound, whole blocks are dropped from the oldest end and the payload carries `thread_context_truncated: true`.
+- The reason it is needed: `buzz-acp` builds a thread's history **once per session** — the first prompt of a thread carries the block, and every later prompt in that session says instead that "Earlier thread context was already delivered in this session". Correct for a long-lived agent process; wrong for a stateless webhook, which then gets the history on request one and a bare delta forever after. relay-backport keeps the ledger the receiver does not have.
+- The per-session ledger is in memory and appended to `<state_dir>/sessions/<session id>.context.jsonl` (0600, one JSON object per line, de-duplicated on `event_id` so a retry is not recorded twice), so a relay-backport restart inside a live session keeps what it already forwarded. A ledger that cannot be read or written is never a delivery failure: an unparsable line is skipped, a failed write is swallowed, and the POST goes out regardless.
+- The context block is parsed with the same outermost-span rule as the event framing, so a forged `</thread-context>` inside a message body cannot truncate the real block.
+
+### Notes
+
+- **A new field, not a rewritten prompt.** `prompt` stays exactly what the harness built — it is what the observe page renders verbatim and derives its per-session token estimate from, and prepending history there would double-count it. In the default `delta` mode the payload is byte-identical to 0.2.x, the field simply absent.
+- Webhook-scoped: the `exec` sink shares the payload builder but is unchanged, and gets no `exec.thread_context` key until something asks for one.
+
 ## 0.2.2 — 2026-09-16
 
 **`relay-backport observe`: a loopback page showing what the agent sees.**
