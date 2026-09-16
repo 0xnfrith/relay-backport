@@ -16,9 +16,9 @@ Single static binary (Bun), no runtime dependencies, identical behaviour on Linu
 |---|---|---|
 | **Buzz Desktop custom harness** | Agents → Add custom harness → `relay-backport`; the Desktop's own `buzz-acp` spawns `relay-backport acp` | **ready** — the ACP flow is covered by tests against an in-process client that sends what the harness sends; the Desktop dialog itself is not exercised in CI |
 | **Headless `buzz-acp`** (a server, a container, the k8s agent image) | `BUZZ_ACP_AGENT_COMMAND=relay-backport BUZZ_ACP_AGENT_ARGS=acp buzz-acp` | **ready** — same ACP flow |
-| **Claude Code — interactive session** | `file` sink + `relay-backport tail` under the session's Monitor tool | **ready** — the `MENTION\|` line is the v0.1 shape, unchanged |
+| **Claude Code — interactive session** | `file` sink + `relay-backport tail` under the session's Monitor tool | **ready** — the `MENTION\|` line is the v0.1 shape, unchanged; the tail's cursor replays anything written while it was down |
 | **Claude Code — headless (`claude -p`)**, any script or shell hook | `exec` sink, one process per prompt, JSON on stdin | **ready** — the sink is tested; a specific `claude -p` invocation is not |
-| **Webhook-driven bots** (cloud agents, Automations, any HTTP trigger) | `webhook` sink, JSON POST with retry | **ready** |
+| **Webhook-driven bots** (cloud agents, Automations, any HTTP trigger) | `webhook` sink, JSON POST with retry | **ready** — `webhook.thread_context = "cumulative"` carries the thread history a stateless receiver cannot keep |
 | **OpenAI Codex CLI — interactive TUI** | — | **uncertain — not yet investigated** |
 | **xAI Grok Build — interactive TUI** | — | **uncertain — not yet investigated** |
 | **OpenCode — interactive TUI** | — | **uncertain — not yet investigated** |
@@ -47,60 +47,166 @@ bun run src/cli.ts acp --config deploy/relay-backport.example.toml
 
 **Docker** — [`deploy/Dockerfile`](deploy/Dockerfile) builds the binary into a non-root image with `/data` as the state volume. On its own the container just waits for a harness on stdin; it is the building block for a headless pod that also runs `buzz-acp` (below).
 
-## 60-second setup: Buzz Desktop
+## Two shapes
 
-1. Put `relay-backport` on your `PATH` (above).
-2. In Buzz Desktop: **Agents → Add custom harness**. The dialog writes `<app data>/custom_harnesses/relay-backport.json`; you can also drop the file in yourself:
+Everything below is one of two arrangements. Pick the one that matches what you are wiring up; both are tested end to end.
 
-   ```json
-   { "id": "relay-backport", "label": "relay-backport", "command": "relay-backport", "args": ["acp"], "env": {} }
-   ```
+| | **(A) Interactive terminal session** | **(B) Webhook agent** |
+|---|---|---|
+| The consumer | a Claude Code session you are sitting in (or any terminal) | an HTTP endpoint somewhere |
+| Sink | `file` + `relay-backport tail` | `webhook` |
+| Keeps state between mentions | yes — it is a running session | **no** — every POST must stand alone |
+| Misses mentions when it restarts | no, the tail cursor replays the gap | no, but it needs the thread history re-sent |
+| Start it with | `relay-backport run` (or Buzz Desktop) | `relay-backport run` (or Buzz Desktop) |
 
-   `args` may be empty — `acp` is the default command. Sink settings go in `env` (`{"RELAY_BACKPORT_SINKS": "webhook", "RELAY_BACKPORT_WEBHOOK_URL": "https://…"}`), in the agent's own environment variables in the Desktop, or in a config file named by `args: ["acp", "--config", "/path/to/relay-backport.toml"]`. With nothing set, the `file` sink writes to the per-user state directory.
-3. Create an agent and pick **relay-backport** as its runtime. Set its "who can send instructions" rule like any other agent — that gate is Buzz's, and it runs before a prompt ever reaches relay-backport. The model picker will show a single entry, **passthrough** — there is no LLM to choose, so this just satisfies the picker.
-4. For a Claude Code session, run the follower under the session's Monitor tool:
+## (A) A Claude Code interactive terminal session
 
-   ```sh
-   relay-backport tail
-   ```
+The agent is you, in a terminal, with the session's context. relay-backport's job is to put each mention on a line you can see without leaving the session.
 
-   Each mention arrives as one line, exactly the shape the v0.1 daemon printed to stdout:
+### 1. Start the harness
 
-   ```
-   MENTION|{"kind":9,"from":"1a2b3c4d","h":"<channel uuid>","content":"…","id":"<event id>","tags":[["h","…"],["p","…"]]}
-   ```
+Either register relay-backport as a **Buzz Desktop custom harness** — **Agents → Add custom harness**, which writes `<app data>/custom_harnesses/relay-backport.json`; you can drop the file in yourself:
 
-   `from` is the first 8 hex chars of the sender (`unknown` when the prompt carried no sender), `content` is capped at 400 characters, `rootId` is added for forum replies (kind 45003). Session lifecycle shows up as `EVENT|session|new|<id>` (or `EVENT|session|new|<id>|<path>` when the system prompt was written to disk — `file.system_prompt`, on by default), `EVENT|session|cancel|<id>`, `EVENT|acp|closed`. `tail` keeps following across truncation, rotation and a file that does not exist yet, and `--no-follow` prints and exits.
-
-   **The tail keeps a line cursor, so a restart does not lose mentions.** `tail` records the number of lines it has handed over in `<state_dir>/tail.cursor` (`--cursor PATH` to move it), advancing it after every line, and on start it resumes from that number: the lines written while the tail was down are replayed, behind one `EVENT|catchup|N line(s) written while the tail was down` line so the consumer can see the gap for what it is. A cold start with no cursor replays the whole file; a file with fewer lines than the cursor claims has rotated, and replays from the top. A file that merely goes missing for a moment does not — the cursor survives, and when the file comes back the tail places itself against it again. The delivery file is a queue, and a supervisor restart is not a reason to drop the mentions that arrived during it. `--no-cursor` restores the pre-0.3 behaviour — follow from the end, keep nothing — and is the only mode in which `--lines N` applies. Read the system prompt file once at the head of the session — see [What the consumer receives](#what-the-consumer-receives).
-
-What Buzz does for you in this mode: it holds the relay socket and the key, discovers channels, applies its respond-to gate, resolves the session scope (channel or thread), fetches thread context and memory, frames the prompt, and shows every prompt in the agent's *Prompt context* panel. relay-backport receives that prompt, whole, and delivers it.
-
-## Headless: `buzz-acp`
-
-Block's `buzz-acp` is Apache-2.0 and is exactly what Buzz Desktop and the Buzz k8s agent image run; it works on a server with no Desktop. It is configured by environment variables (every one has a matching flag). Point its agent command at relay-backport:
-
-```sh
-export BUZZ_RELAY_URL="wss://relay.example.com"
-export BUZZ_PRIVATE_KEY="nsec1…"                # the agent's key — buzz-acp's, never relay-backport's
-export BUZZ_ACP_AGENT_COMMAND="relay-backport"
-export BUZZ_ACP_AGENT_ARGS="acp"                 # comma-separated; e.g. "acp,--config,/etc/relay-backport.toml"
-export RELAY_BACKPORT_SINKS="webhook"
-export RELAY_BACKPORT_WEBHOOK_URL="https://hooks.example.com/relay-backport"
-
-buzz-acp --respond-to allowlist --respond-to-allowlist <hex>,<hex>
+```json
+{ "id": "relay-backport", "label": "relay-backport", "command": "relay-backport", "args": ["acp"], "env": {} }
 ```
 
-`buzz-acp` owns the relay side (`--respond-to owner-only | allowlist | anyone | nobody`, `--session-policy channel | thread`, context, memory); `relay-backport` inherits its environment, so `RELAY_BACKPORT_*` set on `buzz-acp` reaches the sinks. Build it from the [buzz repo](https://github.com/block/buzz) (`crates/buzz-acp`) or take the Desktop's bundled binary.
+`args` may be empty — `acp` is the default command. Sink settings go in `env` (`{"RELAY_BACKPORT_SINKS": "webhook", "RELAY_BACKPORT_WEBHOOK_URL": "https://…"}`), in the agent's own environment variables in the Desktop, or in a config file named by `args: ["acp", "--config", "/path/to/relay-backport.toml"]`. With nothing set, the `file` sink writes to the per-user state directory. Then create an agent and pick **relay-backport** as its runtime; set its "who can send instructions" rule like any other agent — that gate is Buzz's, and it runs before a prompt ever reaches relay-backport. The model picker shows a single entry, **passthrough**; there is no LLM to choose, so this just satisfies the picker.
 
-## Run it: `relay-backport run`
+Or run it yourself with **`relay-backport run`** — see [Run it, headless](#run-it-headless) below. Either way, the terminal that owns the harness is the daemon.
 
-Everything the previous section sets by hand is what an operator ends up keeping in a shell script per machine. `relay-backport run` **is** that script: it builds `buzz-acp`'s environment from config, preflights what can be preflighted, prints the plan, and runs the harness in the foreground — the terminal that runs it is the daemon, and Ctrl-C is ears down.
+### 2. Follow the file
+
+Under the session's **Monitor** tool (or in any spare terminal), one command:
+
+```sh
+relay-backport tail
+```
+
+Each mention arrives as one line — exactly the shape the v0.1 daemon printed to stdout:
+
+```
+MENTION|{"kind":9,"from":"1a2b3c4d","h":"<channel uuid>","content":"…","id":"<event id>","tags":[["h","…"],["p","…"]]}
+```
+
+`from` is the first 8 hex chars of the sender (`unknown` when the prompt carried no sender), `content` is capped at 400 characters, `rootId` is added for forum replies (kind 45003). Session lifecycle shows up as `EVENT|session|new|<id>` (or `EVENT|session|new|<id>|<path>` when the system prompt was written to disk — `file.system_prompt`, on by default), `EVENT|session|cancel|<id>`, `EVENT|acp|closed`. Read that system prompt file once at the head of the session — see [What the consumer receives](#what-the-consumer-receives).
+
+### 3. Gap replay: why a restart does not lose mentions
+
+The delivery file is a queue, and the thing following it will restart — a Monitor re-arms, a terminal is closed, a supervisor cycles. Before 0.3 the tail started at the end of the file, so every mention delivered during that gap was silently dropped, and the consumer had no way to know.
+
+`tail` now keeps a **line cursor**: the number of lines it has handed over, in `<state_dir>/tail.cursor` (`--cursor PATH` to move it), advanced after every line and written atomically. On start it resumes from that number, and announces the gap before replaying it:
+
+```
+EVENT|catchup|3 line(s) written while the tail was down
+MENTION|{…}
+MENTION|{…}
+MENTION|{…}
+```
+
+A cold start with no cursor replays the whole file. A file with fewer lines than the cursor claims has rotated, and replays from the top; so does a truncation or a new inode while following. A file that merely goes *missing* for a moment does not — `stat` fails for a transient error as readily as for a delete, so the cursor survives and the tail places itself against it again when the file returns. `--no-cursor` restores the pre-0.3 behaviour — follow from the end, keep nothing — and is the only mode in which `--lines N` applies. `--no-follow` prints what is pending and exits.
+
+### 4. Watch the context, optionally
+
+`relay-backport observe` puts the *full* prompt — not the 400-character `MENTION|` summary — on a loopback page, with a per-session token estimate. Add the `webhook` sink alongside `file` and point it at the page, or just pass `--observe` to `run`. See [Observe: see what the agent sees](#observe-see-what-the-agent-sees).
+
+### What Buzz does for you in this mode
+
+It holds the relay socket and the key, discovers channels, applies its respond-to gate, resolves the session scope (channel or thread), fetches thread context and memory, frames the prompt, and shows every prompt in the agent's *Prompt context* panel. relay-backport receives that prompt, whole, and delivers it. Your session replies with its own `buzz` tooling; relay-backport never speaks on the relay.
+
+## (B) A webhook agent (stateless receiver)
+
+The agent is an HTTP endpoint. It is handed one request per mention and must answer from that request alone — it was not there for the last one.
+
+```sh
+export RELAY_BACKPORT_SINKS=webhook RELAY_BACKPORT_WEBHOOK_URL=https://hooks.example.com/relay-backport
+export RELAY_BACKPORT_WEBHOOK_BEARER_FILE=$HOME/.config/relay-backport/webhook.token   # optional
+export RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT=cumulative                                 # see below
+```
+
+### The payload
+
+Each prompt is a JSON POST. Delivery is at-least-once, so **the receiver must be idempotent on `event_id`**:
+
+```json
+{
+  "source": "buzz", "transport": "acp", "relay": "wss://…", "channel": "<h tag>",
+  "event_id": "…", "thread_root": "…", "reply_to": "…", "root_id": "… (forum replies only)",
+  "author": "<hex, or empty when unknown>", "kind": 9, "created_at": 0, "text": "…", "tags": [["h","…"],["p","…"]],
+  "event_source": "meta | text | synthetic",
+  "prompt": "<the whole ACP prompt, verbatim>",
+  "session": { "id": "<acp session id>", "cwd": "…", "title": "… (when the harness named it)" },
+  "events": [ "… _meta.buzz.events[] as the harness sent it, when it did" ],
+  "system_prompt": "<the session's system prompt, verbatim — only when webhook.include_system_prompt is true>",
+  "thread_context_cumulative": "<every thread-context block this session has carried, oldest first — cumulative mode only>",
+  "thread_context_truncated": true
+}
+```
+
+The fields worth knowing:
+
+- **`prompt`** — the whole thing the harness built, verbatim. If you only read one field, read this one.
+- **`text`** — just the message content. Convenient, and **untrusted**: it is chat input from whoever mentioned the agent.
+- **`reply_to` / `thread_root` / `channel`** — where to answer. Anchor to `reply_to` rather than trusting a `Channel:` line parsed out of prompt text.
+- **`event_id`** — your idempotency key.
+- **`session.id`** — the ACP session, which is what `thread_context_cumulative` accumulates against.
+
+Retries: network errors, `429` and `5xx` are retried with backoff up to `webhook.attempts` (default 3); `4xx` is final; a timeout is final too, because the server may already have acted.
+
+### `include_system_prompt`: on when the receiver has no instructions of its own
+
+`webhook.include_system_prompt` is **on by default** and attaches Buzz's standing conventions block — CLI reference, mention and threading etiquette, memory protocol, the agent's persona — to every POST. That is 20-40 KB per request.
+
+- **Leave it on** when the receiver is a general model call with no instructions of its own. It is the only way that receiver learns how to behave on the relay.
+- **Turn it off** (`RELAY_BACKPORT_WEBHOOK_INCLUDE_SYSTEM_PROMPT=false`) when the receiver already has its own system prompt or is not a model at all — a router, a queue writer, a bot with a fixed script. Two sets of standing instructions compete, and you pay 20-40 KB a request to create the conflict.
+
+### Cumulative thread context
+
+`buzz-acp` builds a thread's history **once per session**. The first prompt of a thread carries it in a `<thread-context>` block; every later prompt in that session is told, in prose, that "Earlier thread context was already delivered in this session". That is right for a long-lived agent process holding a conversation, and exactly wrong for a webhook: your handler gets the history on the first request and a bare delta on every one after it, with no way to ask for the rest.
+
+relay-backport can keep the ledger your receiver does not have. Set `webhook.thread_context = "cumulative"` (`RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT`) and every POST carries **`thread_context_cumulative`**: every context block the ACP session has seen, oldest first, including this turn's. It is bounded by `webhook.cumulative_max_chars` (default 32000); over the bound, whole blocks are dropped from the oldest end and the payload carries `"thread_context_truncated": true`.
+
+It is a **new field, not a rewritten prompt**. `prompt` stays exactly what the harness built — it is what the observe page renders verbatim and derives its per-session token estimate from, and prepending history there would silently double-count it. A receiver that wants the old behaviour changes nothing: `delta` is the default, and in `delta` mode the payload is byte-identical to 0.2.x.
+
+The ledger lives in memory and is appended to `<state_dir>/sessions/<session id>.context.jsonl` (0600, one JSON object per line), so a relay-backport restart inside a live session keeps what it already forwarded. It is a durability nicety, never a delivery gate: a ledger that cannot be written costs a restart's worth of history, not a mention. The `exec` sink is unchanged — this is a webhook-scoped setting.
+
+### A minimal receiver
+
+```js
+// POST /relay-backport — reply on the relay with your own tooling; relay-backport never does.
+const seen = new Set();                      // in production: a store, not a Set
+
+Bun.serve({
+  port: 8787,
+  async fetch(req) {
+    if (req.method !== "POST") return new Response("no", { status: 405 });
+    const d = await req.json();
+
+    if (seen.has(d.event_id)) return new Response("ok");   // at-least-once: be idempotent
+    seen.add(d.event_id);
+
+    const answer = await yourModel({
+      system: d.system_prompt,                             // omit if your receiver has its own
+      history: d.thread_context_cumulative ?? "",          // cumulative mode: the whole thread, every time
+      prompt: d.prompt,
+    });
+
+    await replyOnBuzz({ channel: d.channel, replyTo: d.reply_to, text: answer });
+    return new Response("ok");                             // any 2xx = accepted; 5xx and 429 are retried
+  },
+});
+```
+
+Answer fast and do the work afterwards if it is slow: relay-backport waits up to `delivery_wait_ms` (default 15 s) before ending the ACP turn regardless, and a timeout is not retried.
+
+## Run it, headless
+
+`relay-backport run` is for either shape. Running the harness headlessly otherwise means getting a dozen environment variables exactly right, which in practice becomes an operator-maintained shell script per machine. `run` **is** that script: it builds `buzz-acp`'s environment from config, preflights what can be preflighted, prints the plan, and runs the harness in the foreground — the terminal that runs it is the daemon, and Ctrl-C is ears down.
 
 ```toml
 # relay-backport.toml
 state_dir = "/var/lib/relay-backport"
-sinks     = ["file"]
+sinks     = ["file"]                        # or ["webhook"] for shape B
 
 [run]
 buzz_acp       = "buzz-acp"                 # or $BUZZ_ACP_BIN; a bare name is looked up on PATH
@@ -126,41 +232,22 @@ The state dir and sinks are passed **twice** — as `RELAY_BACKPORT_*` environme
 
 The preflight prints `OK` / `WARN` / `FAIL` lines and refuses to start on any `FAIL`: the `buzz-acp` binary resolves, the key file exists with mode 0600 and a plausible size, the allowlist is non-empty, the state dir is writable or creatable, no other harness is already running under this session title (`pgrep`; a `WARN` rather than a `FAIL` where that cannot be asked, e.g. Windows), and — with `--observe` — the observe page answers. A relay that does not answer its NIP-11 probe is a **`WARN`, not a `FAIL`**: `buzz-acp` dials and retries the websocket itself, so refusing to start over one blipped HTTPS probe would be the worse failure.
 
-## The webhook case
+### Doing it by hand
+
+`buzz-acp` is Apache-2.0 and is exactly what Buzz Desktop and the Buzz k8s agent image run; it works on a server with no Desktop, and it is configured by environment variables (every one has a matching flag). If you would rather wire it yourself:
 
 ```sh
-export RELAY_BACKPORT_SINKS=webhook RELAY_BACKPORT_WEBHOOK_URL=https://hooks.example.com/relay-backport
-export RELAY_BACKPORT_WEBHOOK_BEARER_FILE=$HOME/.config/relay-backport/webhook.token   # optional
+export BUZZ_RELAY_URL="wss://relay.example.com"
+export BUZZ_PRIVATE_KEY="nsec1…"                 # the agent's key — buzz-acp's, never relay-backport's
+export BUZZ_ACP_AGENT_COMMAND="relay-backport"
+export BUZZ_ACP_AGENT_ARGS="acp"                 # comma-separated; e.g. "acp,--config,/etc/relay-backport.toml"
+export RELAY_BACKPORT_SINKS="webhook"
+export RELAY_BACKPORT_WEBHOOK_URL="https://hooks.example.com/relay-backport"
+
+buzz-acp --respond-to allowlist --respond-to-allowlist <hex>,<hex>
 ```
 
-Each prompt is a JSON POST; the receiver must be idempotent on `event_id` (delivery is at-least-once):
-
-```json
-{
-  "source": "buzz", "transport": "acp", "relay": "wss://…", "channel": "<h tag>",
-  "event_id": "…", "thread_root": "…", "reply_to": "…", "root_id": "… (forum replies only)",
-  "author": "<hex, or empty when unknown>", "kind": 9, "created_at": 0, "text": "…", "tags": [["h","…"],["p","…"]],
-  "event_source": "meta | text | synthetic",
-  "prompt": "<the whole ACP prompt, verbatim>",
-  "session": { "id": "<acp session id>", "cwd": "…", "title": "… (when the harness named it)" },
-  "events": [ "… _meta.buzz.events[] as the harness sent it, when it did" ],
-  "system_prompt": "<the session's session/new system prompt, verbatim — only when webhook.include_system_prompt is true and the session had one>",
-  "thread_context_cumulative": "<every thread-context block this session has carried, oldest first — only in cumulative mode>",
-  "thread_context_truncated": true
-}
-```
-
-Retries: network errors, `429` and `5xx` are retried with backoff up to `webhook.attempts` (default 3); `4xx` is final; a timeout is final because the server may already have acted.
-
-### Stateless receivers: `webhook.thread_context`
-
-`buzz-acp` builds a thread's history **once per session**. The first prompt of a thread carries it in a `<thread-context>` block; every later prompt in that session is told, in prose, that "Earlier thread context was already delivered in this session". That is right for a long-lived agent process holding a conversation, and exactly wrong for a webhook: your handler gets the history on the first request and a bare delta on every one after it, with no way to ask for the rest.
-
-So relay-backport can keep the ledger your receiver does not have. Set `webhook.thread_context = "cumulative"` (`RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT`) and every POST carries **`thread_context_cumulative`**: every context block the ACP session has seen, oldest first, including this turn's. It is bounded by `webhook.cumulative_max_chars` (default 32000); over the bound, whole blocks are dropped from the oldest end and the payload carries `"thread_context_truncated": true`.
-
-It is a **new field, not a rewritten prompt**. `prompt` stays exactly what the harness built — it is what the observe page renders verbatim and derives its per-session token estimate from, and prepending history there would silently double-count it. A receiver that wants the old behaviour changes nothing: `delta` is the default, and in `delta` mode the payload is byte-identical to 0.2.x.
-
-The ledger lives in memory and is appended to `<state_dir>/sessions/<session id>.context.jsonl` (0600, one JSON object per line), so a relay-backport restart inside a live session keeps what it already forwarded. It is a durability nicety, never a delivery gate: a ledger that cannot be written costs a restart's worth of history, not a mention. The `exec` sink is unchanged — this is a webhook-scoped setting.
+`buzz-acp` owns the relay side (`--respond-to owner-only | allowlist | anyone | nobody`, `--session-policy channel | thread`, context, memory); `relay-backport` inherits its environment, so `RELAY_BACKPORT_*` set on `buzz-acp` reaches the sinks. Build it from the [buzz repo](https://github.com/block/buzz) (`crates/buzz-acp`) or take the Desktop's bundled binary.
 
 ## The exec case
 
@@ -334,7 +421,7 @@ bun run build            # dist/relay-backport-{linux-x64,darwin-arm64,windows-x
 RELAY_BACKPORT_BIN=$PWD/dist/relay-backport-darwin-arm64 bun test test/binary.test.ts
 ```
 
-Layout: `src/cli.ts` · `src/config.ts` · `src/acp-server.ts` (JSON-RPC server) · `src/prompt.ts` (prompt → event) · `src/delivery.ts` (record, `MENTION|` line, payload) · `src/sinks/{file,webhook,exec}.ts` · `src/tail.ts` · `src/observe.ts` (the loopback page) · `src/log.ts` · `test/` · `deploy/` · `docs/` · `.github/workflows/` · `CHANGELOG.md`.
+Layout: `src/cli.ts` · `src/config.ts` · `src/acp-server.ts` (JSON-RPC server) · `src/prompt.ts` (prompt → event) · `src/delivery.ts` (record, `MENTION|` line, payload) · `src/sinks/{file,webhook,exec}.ts` · `src/tail.ts` (follower + line cursor) · `src/run.ts` (the launcher) · `src/thread-context.ts` (the cumulative ledger) · `src/observe.ts` (the loopback page) · `src/log.ts` · `test/` · `deploy/` · `docs/` · `.github/workflows/` · `CHANGELOG.md`.
 
 ## License
 
