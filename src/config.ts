@@ -22,6 +22,12 @@ export const DEFAULT_WEBHOOK_ATTEMPTS = 3;
 export const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 export const DEFAULT_DELIVERY_WAIT_MS = 15_000;
 export const DEFAULT_CUMULATIVE_MAX_CHARS = 32_000;
+export const DEFAULT_BUZZ_ACP_BIN = "buzz-acp";
+export const DEFAULT_SESSION_TITLE = "relay-backport-ears";
+export const DEFAULT_SESSION_POLICY = "thread";
+/** Where `--observe` expects `relay-backport observe` to be listening. */
+export const DEFAULT_OBSERVE_PAGE_URL = "http://127.0.0.1:7479/";
+export const DEFAULT_OBSERVE_INGEST_URL = "http://127.0.0.1:7479/ingest";
 
 /** Environment variables Buzz injects into a harness that must never reach a log line. */
 export const BUZZ_SECRET_ENV = ["BUZZ_PRIVATE_KEY", "BUZZ_ACP_PRIVATE_KEY", "NOSTR_PRIVATE_KEY", "BUZZ_API_TOKEN", "BUZZ_ACP_API_TOKEN", "BUZZ_AUTH_TAG"];
@@ -64,6 +70,28 @@ export type ExecConfig = {
   includeSystemPrompt: boolean;
 };
 
+/** `relay-backport run`: what the launcher needs to spawn `buzz-acp`. */
+export type RunConfig = {
+  /** The `buzz-acp` binary: a path, or a bare name looked up on PATH. */
+  buzzAcp: string;
+  /** The file holding the agent's private key. Its bytes go to the child's env and nowhere else. */
+  keyFile: string;
+  /** `BUZZ_RELAY_URL` for the child. */
+  relayUrl: string;
+  /** `BUZZ_ACP_AGENT_OWNER`, when there is one. */
+  owner?: string;
+  /** Pubkeys allowed to instruct the agent, before the store is merged in. */
+  allowlist: string[];
+  /** A JSON allowlist store — `{ "entries": [{ "pubkey": "…" }] }` — merged into the list. */
+  allowlistFile?: string;
+  sessionTitle: string;
+  sessionPolicy: string;
+  /** Override the path used for `BUZZ_ACP_AGENT_COMMAND` (default: this program). */
+  self?: string;
+  observePageUrl: string;
+  observeIngestUrl: string;
+};
+
 export type Config = {
   stateDir: string;
   sinks: SinkName[];
@@ -75,6 +103,7 @@ export type Config = {
   file?: FileConfig;
   webhook?: WebhookConfig;
   exec?: ExecConfig;
+  run: RunConfig;
   /** Where the config file came from, for logs. */
   configPath?: string;
 };
@@ -96,6 +125,19 @@ export type RawConfig = {
     cumulative_max_chars?: number | string;
   };
   exec?: { command?: string[] | string; timeout_ms?: number | string; pass_buzz_env?: boolean | string; include_system_prompt?: boolean | string };
+  run?: {
+    buzz_acp?: string;
+    key_file?: string;
+    relay_url?: string;
+    owner?: string;
+    allowlist?: string[] | string;
+    allowlist_file?: string;
+    session_title?: string;
+    session_policy?: string;
+    self?: string;
+    observe_page_url?: string;
+    observe_ingest_url?: string;
+  };
 };
 
 export type EnvMap = Record<string, string | undefined>;
@@ -177,6 +219,23 @@ export function rawFromEnv(env: EnvMap): RawConfig {
     if (passBuzz) raw.exec.pass_buzz_env = passBuzz;
     if (execIncludeSystemPrompt !== undefined) raw.exec.include_system_prompt = execIncludeSystemPrompt;
   }
+  const run: NonNullable<RawConfig["run"]> = {};
+  const runGet = (name: string, key: keyof NonNullable<RawConfig["run"]>) => {
+    const v = get(`RUN_${name}`);
+    if (v) (run as Record<string, unknown>)[key] = v;
+  };
+  runGet("BUZZ_ACP", "buzz_acp");
+  runGet("KEY_FILE", "key_file");
+  runGet("RELAY_URL", "relay_url");
+  runGet("OWNER", "owner");
+  runGet("ALLOWLIST", "allowlist");
+  runGet("ALLOWLIST_FILE", "allowlist_file");
+  runGet("SESSION_TITLE", "session_title");
+  runGet("SESSION_POLICY", "session_policy");
+  runGet("SELF", "self");
+  runGet("OBSERVE_PAGE_URL", "observe_page_url");
+  runGet("OBSERVE_INGEST_URL", "observe_ingest_url");
+  if (Object.keys(run).length > 0) raw.run = run;
   return raw;
 }
 
@@ -185,6 +244,7 @@ function mergeRaw(base: RawConfig, over: RawConfig): RawConfig {
   if (base.file || over.file) out.file = { ...(base.file ?? {}), ...(over.file ?? {}) };
   if (base.webhook || over.webhook) out.webhook = { ...(base.webhook ?? {}), ...(over.webhook ?? {}) };
   if (base.exec || over.exec) out.exec = { ...(base.exec ?? {}), ...(over.exec ?? {}) };
+  if (base.run || over.run) out.run = { ...(base.run ?? {}), ...(over.run ?? {}) };
   return out;
 }
 
@@ -323,6 +383,24 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     };
   }
 
+  const runRaw = raw.run ?? {};
+  const run: RunConfig = {
+    // BUZZ_ACP_BIN is Buzz's own variable name, so it is read unprefixed —
+    // this is the one place relay-backport reads a non-RELAY_BACKPORT_ setting
+    // that is not injected by the harness.
+    buzzAcp: runRaw.buzz_acp?.trim() || trimEnv(env.BUZZ_ACP_BIN) || DEFAULT_BUZZ_ACP_BIN,
+    keyFile: runRaw.key_file?.trim() ? resolve(runRaw.key_file.trim()) : "",
+    relayUrl: runRaw.relay_url?.trim() || trimEnv(env.BUZZ_RELAY_URL) || "",
+    owner: runRaw.owner?.trim() || undefined,
+    allowlist: toList(runRaw.allowlist) ?? [],
+    allowlistFile: runRaw.allowlist_file?.trim() ? resolve(runRaw.allowlist_file.trim()) : undefined,
+    sessionTitle: runRaw.session_title?.trim() || DEFAULT_SESSION_TITLE,
+    sessionPolicy: runRaw.session_policy?.trim() || DEFAULT_SESSION_POLICY,
+    self: runRaw.self?.trim() || undefined,
+    observePageUrl: runRaw.observe_page_url?.trim() || DEFAULT_OBSERVE_PAGE_URL,
+    observeIngestUrl: runRaw.observe_ingest_url?.trim() || DEFAULT_OBSERVE_INGEST_URL,
+  };
+
   return {
     stateDir,
     sinks,
@@ -332,6 +410,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     file,
     webhook,
     exec,
+    run,
     configPath,
   };
 }
@@ -354,6 +433,7 @@ export function describeConfig(cfg: Config): Record<string, unknown> {
         }
       : null,
     exec: cfg.exec ? { command: cfg.exec.command, timeout_ms: cfg.exec.timeoutMs, pass_buzz_env: cfg.exec.passBuzzEnv, include_system_prompt: cfg.exec.includeSystemPrompt } : null,
+    run: { buzz_acp: cfg.run.buzzAcp, key_file: cfg.run.keyFile || null, session_title: cfg.run.sessionTitle, allowlist: cfg.run.allowlist.length, allowlist_file: cfg.run.allowlistFile ?? null },
     config: cfg.configPath ?? null,
   };
 }

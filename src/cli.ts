@@ -4,6 +4,7 @@
 //   relay-backport [acp]   the ACP server a Buzz harness spawns (the default,
 //                          so a Desktop custom-harness entry can be just the
 //                          command name)
+//   relay-backport run     launch buzz-acp with this program as its ACP agent
 //   relay-backport tail    follow the file sink and print its lines
 //   relay-backport observe  a loopback page showing what the agent sees
 //
@@ -13,6 +14,7 @@ import { ConfigError, DEFAULT_TAIL_CURSOR_NAME, describeConfig, loadConfig, type
 import { configureLog, log, errMessage } from "./log";
 import { DEFAULT_BIND, DEFAULT_BUFFER, DEFAULT_PORT, startObserveServer } from "./observe";
 import { buildSinks } from "./sinks/index";
+import { buildPlan, pgrepSessionTitle, preflight, probeUrl, renderPlan, runHarness } from "./run";
 import { tailFile } from "./tail";
 import { NAME, VERSION } from "./version";
 import { join, resolve } from "node:path";
@@ -23,6 +25,7 @@ Buzz owns the relay; relay-backport owns delivery.
 
 USAGE
   ${NAME} [acp] [options]     run the ACP server (what a Buzz harness spawns; the default)
+  ${NAME} run [options]       launch buzz-acp with this program as its ACP agent
   ${NAME} tail [options]      follow the file sink and print its MENTION|/EVENT| lines
   ${NAME} observe [options]   serve a loopback page showing what the agent sees
   ${NAME} --help | --version
@@ -37,6 +40,12 @@ OPTIONS (all commands)
 OPTIONS (acp)
   --sink NAME          file | webhook | exec (repeatable); or RELAY_BACKPORT_SINKS (default file)
   No relay URL or key: the harness that spawned this process owns them.
+
+OPTIONS (run)
+  --dry-run            preflight, print the plan with the key redacted, and exit; reads no key
+  --observe            add the webhook sink and point it at the local observe page
+  The key comes from run.key_file and reaches the child's ${"BUZZ_PRIVATE_KEY"} only —
+  never a command line, never a log line, never the printed plan.
 
 OPTIONS (tail)
   --cursor PATH        the line cursor (default STATE_DIR/${DEFAULT_TAIL_CURSOR_NAME}); on by default, so a
@@ -63,7 +72,7 @@ export type ParsedArgs = {
 };
 
 const VALUE_FLAGS = new Set(["config", "state-dir", "file", "sink", "log-format", "lines", "cursor", "port", "buffer", "bind"]);
-const BOOL_FLAGS = new Set(["help", "version", "verbose", "no-follow", "no-cursor"]);
+const BOOL_FLAGS = new Set(["help", "version", "verbose", "no-follow", "no-cursor", "dry-run", "observe"]);
 const REPEATABLE = new Set(["sink"]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -190,6 +199,45 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
         await server.done;
         for (const s of sinks) await s.close?.();
         return 0;
+      }
+      case "run": {
+        const cfg = loadConfig({ configPath: str(args.flags.config), env: io.env, overrides: overridesFromFlags(args.flags) });
+        configureLog({ format: cfg.logFormat, level: args.flags.verbose === true ? "debug" : "info" });
+        if (!cfg.run.keyFile) throw new ConfigError("run needs run.key_file (RELAY_BACKPORT_RUN_KEY_FILE)");
+        const observe = args.flags.observe === true;
+        const dryRun = args.flags["dry-run"] === true;
+        const plan = buildPlan({
+          run: cfg.run,
+          stateDir: cfg.stateDir,
+          sinks: cfg.sinks,
+          observe,
+          env: io.env,
+          execPath: process.execPath,
+          mainPath: Bun.main,
+        });
+        io.out("PREFLIGHT");
+        const checks = await preflight({
+          plan,
+          run: cfg.run,
+          stateDir: cfg.stateDir,
+          observe,
+          probe: probeUrl,
+          duplicateSessionTitle: pgrepSessionTitle,
+        });
+        for (const c of checks) io.out(`  ${c.level} — ${c.text}`);
+        io.out("");
+        io.out(renderPlan(plan));
+        io.out("");
+        if (checks.some((c) => c.level === "FAIL")) {
+          io.err("preflight failed; nothing started");
+          return 1;
+        }
+        if (dryRun) {
+          io.out("  --dry-run: stopping here. Nothing started, no key read.");
+          return 0;
+        }
+        io.out(`EARS UP — this terminal is the daemon. Ctrl-C stops it.`);
+        return await runHarness({ plan, run: cfg.run, stateDir: cfg.stateDir, env: io.env, out: io.out, signal: io.signal });
       }
       case "tail": {
         const cfg = loadConfig({

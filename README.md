@@ -93,6 +93,39 @@ buzz-acp --respond-to allowlist --respond-to-allowlist <hex>,<hex>
 
 `buzz-acp` owns the relay side (`--respond-to owner-only | allowlist | anyone | nobody`, `--session-policy channel | thread`, context, memory); `relay-backport` inherits its environment, so `RELAY_BACKPORT_*` set on `buzz-acp` reaches the sinks. Build it from the [buzz repo](https://github.com/block/buzz) (`crates/buzz-acp`) or take the Desktop's bundled binary.
 
+## Run it: `relay-backport run`
+
+Everything the previous section sets by hand is what an operator ends up keeping in a shell script per machine. `relay-backport run` **is** that script: it builds `buzz-acp`'s environment from config, preflights what can be preflighted, prints the plan, and runs the harness in the foreground — the terminal that runs it is the daemon, and Ctrl-C is ears down.
+
+```toml
+# relay-backport.toml
+state_dir = "/var/lib/relay-backport"
+sinks     = ["file"]
+
+[run]
+buzz_acp       = "buzz-acp"                 # or $BUZZ_ACP_BIN; a bare name is looked up on PATH
+key_file       = "/etc/relay-backport/agent.key"   # mode 0600; the ONLY place the key comes from
+relay_url      = "wss://relay.example.com"
+owner          = "<hex>"
+allowlist      = ["<hex>", "<hex>"]
+allowlist_file = "/var/lib/relay-backport/allowlist.json"   # { "entries": [{ "pubkey": "<hex>" }] }, merged in
+session_title  = "relay-backport-ears"      # also how the duplicate-harness check finds a live one
+```
+
+```sh
+relay-backport run --dry-run --config relay-backport.toml   # preflight + plan; starts nothing, reads no key
+relay-backport run --config relay-backport.toml             # ears up
+relay-backport run --config relay-backport.toml --observe   # ...and POST to the local observe page too
+```
+
+**The key never leaves the file except into the child's environment.** `run` puts it in `BUZZ_PRIVATE_KEY` for the process it spawns and nowhere else: not on a command line (where `ps` would show it to every user on the box), not in a log line, not in the printed plan — which names the key's *file* and its *byte count* and stops there. `--dry-run` does not read the key's bytes at all; it stats the file for a size. The only values `run` prints are public keys, paths and counts.
+
+What it hands `buzz-acp`: `--session-title <run.session_title> --no-memory --lazy-pool --no-typing --multiple-event-handling queue`, and an environment of `BUZZ_RELAY_URL`, `BUZZ_ACP_AGENT_OWNER`, `BUZZ_ACP_RESPOND_TO=allowlist` + the merged `BUZZ_ACP_RESPOND_TO_ALLOWLIST`, `BUZZ_ACP_AGENT_COMMAND` (this program), `BUZZ_ACP_AGENT_ARGS` (`acp,--state-dir,…,--sink,…`), `BUZZ_ACP_SESSION_POLICY`, plus `RELAY_BACKPORT_STATE_DIR` / `RELAY_BACKPORT_SINKS`. Memory is off because relay-backport is a pipe, not an LLM; typing is off because it never replies, so a typing indicator would be a phantom; presence stays on, because "the agent is online" is the ears-up signal. `--multiple-event-handling queue` rather than the `steer` default: steering cancels an in-flight turn and re-dispatches a merged prompt, which for a file sink means the same mention can land in the file twice.
+
+The state dir and sinks are passed **twice** — as `RELAY_BACKPORT_*` environment, and as flags inside `BUZZ_ACP_AGENT_ARGS`, which win in relay-backport's precedence. Belt and braces: a harness that ever scrubs its child's environment still lands deliveries in the right file.
+
+The preflight prints `OK` / `WARN` / `FAIL` lines and refuses to start on any `FAIL`: the `buzz-acp` binary resolves, the key file exists with mode 0600 and a plausible size, the allowlist is non-empty, the state dir is writable or creatable, no other harness is already running under this session title (`pgrep`; a `WARN` rather than a `FAIL` where that cannot be asked, e.g. Windows), and — with `--observe` — the observe page answers. A relay that does not answer its NIP-11 probe is a **`WARN`, not a `FAIL`**: `buzz-acp` dials and retries the websocket itself, so refusing to start over one blipped HTTPS probe would be the worse failure.
+
 ## The webhook case
 
 ```sh
@@ -226,7 +259,7 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 
 Buzz's own variables (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, …) are not configuration for relay-backport: `BUZZ_RELAY_URL` is copied into payloads as `relay`, the key and any API token are registered with the log redactor at startup, and none of them is read otherwise.
 
-CLI: `relay-backport [acp] [--config PATH] [--sink NAME]… [--file PATH] [--state-dir PATH] [--log-format FMT] [--verbose]` · `relay-backport tail [--file PATH] [--cursor PATH | --no-cursor] [--lines N] [--no-follow] [--config PATH]` · `relay-backport observe [--port N] [--buffer N] [--bind ADDR]` · `--help` · `--version`. Exit codes: `0` ok, `1` configuration or usage.
+CLI: `relay-backport run [--config PATH] [--dry-run] [--observe]` · `relay-backport [acp] [--config PATH] [--sink NAME]… [--file PATH] [--state-dir PATH] [--log-format FMT] [--verbose]` · `relay-backport tail [--file PATH] [--cursor PATH | --no-cursor] [--lines N] [--no-follow] [--config PATH]` · `relay-backport observe [--port N] [--buffer N] [--bind ADDR]` · `--help` · `--version`. Exit codes: `0` ok, `1` configuration or usage.
 
 ## Sinks
 
