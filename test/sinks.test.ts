@@ -168,13 +168,13 @@ describe("webhook sink", () => {
       },
     });
     cleanups.push(() => srv.stop(true));
-    const sink = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, bearerFile: bearerPath, timeoutMs: 2000, attempts: 1, includeSystemPrompt: true });
+    const sink = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, bearerFile: bearerPath, timeoutMs: 2000, attempts: 1, includeSystemPrompt: true, threadContext: "delta" as const, cumulativeMaxChars: 32_000 });
     const d = delivery("x");
     expect(await sink.deliver(d)).toBe(true);
     expect(got[0]?.auth).toBe("Bearer super-secret-token-value");
     expect(got[0]?.body).toMatchObject({ source: "buzz", transport: "acp", event_id: d.event.id, text: "x", prompt: "prompt text", session: { id: "sess-1" } });
     expect(redact("token super-secret-token-value here")).toBe("token [redacted] here");
-    expect(() => new WebhookSink({ url: "http://x", bearerFile: "/nope/bearer", timeoutMs: 1, attempts: 1, includeSystemPrompt: false })).toThrow(/bearer/);
+    expect(() => new WebhookSink({ url: "http://x", bearerFile: "/nope/bearer", timeoutMs: 1, attempts: 1, includeSystemPrompt: false, threadContext: "delta" as const, cumulativeMaxChars: 32_000 })).toThrow(/bearer/);
   });
 
   test("retries 5xx with backoff and gives up after attempts; 4xx is final; network errors retry", async () => {
@@ -189,7 +189,7 @@ describe("webhook sink", () => {
     });
     cleanups.push(() => srv.stop(true));
     const sleeps: number[] = [];
-    const sink = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, timeoutMs: 2000, attempts: 3, includeSystemPrompt: false }, undefined, { sleep: async (ms) => void sleeps.push(ms) });
+    const sink = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, timeoutMs: 2000, attempts: 3, includeSystemPrompt: false, threadContext: "delta" as const, cumulativeMaxChars: 32_000 }, undefined, { sleep: async (ms) => void sleeps.push(ms) });
     expect(await sink.deliver(delivery())).toBe(false);
     expect(calls).toBe(3);
     expect(sleeps).toEqual([1000, 2000]);
@@ -204,11 +204,11 @@ describe("webhook sink", () => {
       },
     });
     cleanups.push(() => srv4.stop(true));
-    expect(await new WebhookSink({ url: `http://127.0.0.1:${srv4.port}/h`, timeoutMs: 2000, attempts: 3, includeSystemPrompt: false }, undefined, { sleep: async () => {} }).deliver(delivery())).toBe(false);
+    expect(await new WebhookSink({ url: `http://127.0.0.1:${srv4.port}/h`, timeoutMs: 2000, attempts: 3, includeSystemPrompt: false, threadContext: "delta" as const, cumulativeMaxChars: 32_000 }, undefined, { sleep: async () => {} }).deliver(delivery())).toBe(false);
     expect(calls4).toBe(1);
 
     const down: number[] = [];
-    expect(await new WebhookSink({ url: "http://127.0.0.1:1/h", timeoutMs: 1000, attempts: 2, includeSystemPrompt: false }, undefined, { sleep: async (ms) => void down.push(ms) }).deliver(delivery())).toBe(false);
+    expect(await new WebhookSink({ url: "http://127.0.0.1:1/h", timeoutMs: 1000, attempts: 2, includeSystemPrompt: false, threadContext: "delta" as const, cumulativeMaxChars: 32_000 }, undefined, { sleep: async (ms) => void down.push(ms) }).deliver(delivery())).toBe(false);
     expect(down.length).toBe(1);
     expect(isRetryableStatus(429)).toBe(true);
     expect(isRetryableStatus(404)).toBe(false);
@@ -228,11 +228,11 @@ describe("webhook sink", () => {
     cleanups.push(() => srv.stop(true));
     const withPrompt = { ...delivery("x"), systemPrompt: "be terse\nnever compress" };
 
-    const on = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, timeoutMs: 2000, attempts: 1, includeSystemPrompt: true });
+    const on = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, timeoutMs: 2000, attempts: 1, includeSystemPrompt: true , threadContext: "delta" as const, cumulativeMaxChars: 32_000 });
     expect(await on.deliver(withPrompt)).toBe(true);
     expect(got[0]?.system_prompt).toBe("be terse\nnever compress");
 
-    const off = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, timeoutMs: 2000, attempts: 1, includeSystemPrompt: false });
+    const off = new WebhookSink({ url: `http://127.0.0.1:${srv.port}/h`, timeoutMs: 2000, attempts: 1, includeSystemPrompt: false , threadContext: "delta" as const, cumulativeMaxChars: 32_000 });
     expect(await off.deliver(withPrompt)).toBe(true);
     expect("system_prompt" in got[1]!).toBe(false);
   });

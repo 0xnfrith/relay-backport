@@ -56,7 +56,7 @@ describe("config loading", () => {
     expect(cfg.sinks).toEqual(["file", "webhook", "exec"]);
     expect(cfg.deliveryWaitMs).toBe(2500);
     expect(cfg.file).toEqual({ path: "/var/log/rb/deliveries.jsonl", systemPrompt: true, buzzEnvFile: undefined });
-    expect(cfg.webhook).toEqual({ url: "https://hooks.example.com/x", bearerFile: undefined, timeoutMs: 1234, attempts: 3, includeSystemPrompt: true });
+    expect(cfg.webhook).toEqual({ url: "https://hooks.example.com/x", bearerFile: undefined, timeoutMs: 1234, attempts: 3, includeSystemPrompt: true, threadContext: "delta", cumulativeMaxChars: 32_000 });
     expect(cfg.exec).toEqual({ command: ["/usr/local/bin/handle", "--from-relay"], timeoutMs: 60_000, passBuzzEnv: true, includeSystemPrompt: false });
     expect(cfg.configPath).toBe("/etc/rb.toml");
   });
@@ -97,7 +97,7 @@ describe("config loading", () => {
     expect(cfg.stateDir).toBe("/s");
     expect(cfg.sinks).toEqual(["webhook", "exec"]);
     expect(cfg.deliveryWaitMs).toBe(100);
-    expect(cfg.webhook).toEqual({ url: "https://h.example/x", bearerFile: "/s/bearer", timeoutMs: 5, attempts: 2, includeSystemPrompt: true });
+    expect(cfg.webhook).toEqual({ url: "https://h.example/x", bearerFile: "/s/bearer", timeoutMs: 5, attempts: 2, includeSystemPrompt: true, threadContext: "delta", cumulativeMaxChars: 32_000 });
     expect(cfg.exec).toEqual({ command: ["/bin/handle", "--x"], timeoutMs: 9, passBuzzEnv: true, includeSystemPrompt: false });
     expect(cfg.relayUrl).toBe("wss://relay.example");
     expect(cfg.file).toBeUndefined();
