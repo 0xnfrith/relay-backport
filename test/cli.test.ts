@@ -48,6 +48,7 @@ describe("main", () => {
     expect(await main(["--help"], h)).toBe(0);
     expect(h.outLines[0]).toBe(HELP.trimEnd());
     expect(HELP).toContain("relay-backport tail");
+    expect(HELP).toContain("--no-cursor");
     const v = io();
     expect(await main(["--version"], v)).toBe(0);
     expect(v.outLines[0]).toMatch(/^relay-backport \d+\.\d+\.\d+$/);
@@ -96,8 +97,8 @@ describe("main", () => {
     const file = join(t.dir, "d.jsonl");
     writeFileSync(file, "MENTION|{}\n");
     const ctl = new AbortController();
-    const c = io({ RELAY_BACKPORT_FILE: file }, { signal: ctl.signal });
-    const run = main(["tail"], c);
+    const c = io({ RELAY_BACKPORT_FILE: file, RELAY_BACKPORT_STATE_DIR: t.dir }, { signal: ctl.signal });
+    const run = main(["tail", "--no-cursor"], c);
     await Bun.sleep(80);
     appendFileSync(file, "EVENT|acp|closed\n");
     await waitFor(() => c.outLines.length === 1, 2000, "followed line");
@@ -107,8 +108,44 @@ describe("main", () => {
 
     const once = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
     writeFileSync(join(t.dir, "deliveries.jsonl"), "a\nb\n");
-    expect(await main(["tail", "--no-follow", "--lines", "1"], once)).toBe(0);
+    expect(await main(["tail", "--no-cursor", "--no-follow", "--lines", "1"], once)).toBe(0);
     expect(once.outLines).toEqual(["b"]);
+  });
+
+  test("tail keeps a cursor by default: it replays the gap, advances, and --cursor moves the file", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const file = join(t.dir, "deliveries.jsonl");
+    writeFileSync(file, "MENTION|{\"a\":1}\nMENTION|{\"a\":2}\n");
+
+    const first = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["tail", "--no-follow"], first)).toBe(0);
+    expect(first.outLines[0]).toContain("EVENT|catchup|2 line(s)");
+    expect(first.outLines.slice(1)).toEqual(['MENTION|{"a":1}', 'MENTION|{"a":2}']);
+    expect(await Bun.file(join(t.dir, "tail.cursor")).text()).toBe("2\n");
+
+    // a second run over an unchanged file replays nothing
+    const second = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["tail", "--no-follow"], second)).toBe(0);
+    expect(second.outLines).toEqual([]);
+
+    // --cursor picks a different cursor file, which is cold, so everything replays
+    const elsewhere = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    const other = join(t.dir, "other.cursor");
+    expect(await main(["tail", "--no-follow", "--cursor", other], elsewhere)).toBe(0);
+    expect(elsewhere.outLines.length).toBe(3);
+    expect(await Bun.file(other).text()).toBe("2\n");
+  });
+
+  test("tail rejects --cursor with --no-cursor, and --lines with a cursor", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const both = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["tail", "--cursor", join(t.dir, "c"), "--no-cursor"], both)).toBe(1);
+    expect(both.errLines[0]).toContain("--cursor and --no-cursor");
+    const lines = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["tail", "--lines", "3"], lines)).toBe(1);
+    expect(lines.errLines[0]).toContain("--no-cursor");
   });
 
   test("observe serves the page, ingests a delivery and stops on abort", async () => {
