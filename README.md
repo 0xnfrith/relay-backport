@@ -89,7 +89,7 @@ Each mention arrives as one line — exactly the shape the v0.1 daemon printed t
 MENTION|{"kind":9,"from":"1a2b3c4d","h":"<channel uuid>","content":"…","id":"<event id>","tags":[["h","…"],["p","…"]]}
 ```
 
-`from` is the first 8 hex chars of the sender (`unknown` when the prompt carried no sender), `content` is capped at 400 characters, `rootId` is added for forum replies (kind 45003). Session lifecycle shows up as `EVENT|session|new|<id>` (or `EVENT|session|new|<id>|<path>` when the system prompt was written to disk — `file.system_prompt`, on by default), `EVENT|session|cancel|<id>`, `EVENT|acp|closed`. Read that system prompt file once at the head of the session — see [What the consumer receives](#what-the-consumer-receives).
+`from` is the first 8 hex chars of the sender (`unknown` when the prompt carried no sender), `content` is the message text **whole** — this line is the delivery, not a preview of it, so a cap here drops instructions off the end of a long message — and `rootId` is added for forum replies (kind 45003). Set `file.content_max_chars` to cap it anyway (0, the default, means unlimited); a cap that actually bites adds `"truncated":true` to the line, so a consumer can tell a short message from a clipped one. Before 0.3.2 the cap was a fixed 400 characters with no flag. Session lifecycle shows up as `EVENT|session|new|<id>` (or `EVENT|session|new|<id>|<path>` when the system prompt was written to disk — `file.system_prompt`, on by default), `EVENT|session|cancel|<id>`, `EVENT|acp|closed`. Read that system prompt file once at the head of the session — see [What the consumer receives](#what-the-consumer-receives).
 
 ### 3. Gap replay: why a restart does not lose mentions
 
@@ -282,7 +282,7 @@ A Buzz harness sends its standing context **once per session** (on `session/new`
 
 ## Observe: see what the agent sees
 
-The harness builds a prompt and hands it over; after that it is invisible — the `file` sink caps content at 400 characters and the `webhook` sink POSTs into somebody else's server. `relay-backport observe` puts that material on a page.
+The harness builds a prompt and hands it over; after that it is invisible — the `file` sink carries only the mention itself (and whatever `file.content_max_chars` leaves of it) and the `webhook` sink POSTs into somebody else's server. `relay-backport observe` puts that material on a page.
 
 ```sh
 relay-backport observe            # http://127.0.0.1:7479/ — loopback, no auth, nothing on disk
@@ -333,6 +333,7 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `tail` cursor | *(CLI only: `--cursor`)* | `<state_dir>/tail.cursor` | Lines `tail` has already delivered; `--no-cursor` turns it off |
 | `file.path` | `RELAY_BACKPORT_FILE` | `<state_dir>/deliveries.jsonl` | The file the `file` sink appends to and `tail` follows |
 | `file.system_prompt` | `RELAY_BACKPORT_FILE_SYSTEM_PROMPT` | `true` | Write the session's system prompt to `<state_dir>/sessions/<id>.system-prompt.md` once, and name it in the `EVENT|session|new|…` line |
+| `file.content_max_chars` | `RELAY_BACKPORT_FILE_CONTENT_MAX_CHARS` | `0` (unlimited) | Cap the `MENTION|` line's `content` at N characters (CLI: `--file-content-max-chars N`); a cap that bites adds `"truncated":true` |
 | `file.buzz_env_file` | `RELAY_BACKPORT_FILE_BUZZ_ENV_FILE` | — (off) | Path to (re)write the present `BUZZ_RELAY_URL` / `BUZZ_PRIVATE_KEY` / `BUZZ_AUTH_TAG` to, on every `session/new` — holds the agent's private key; see [Security notes](#security-notes) |
 | `webhook.thread_context` | `RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT` | `delta` | `cumulative` also carries every thread-context block the session has seen and every mention already delivered in it |
 | `webhook.cumulative_max_chars` | `RELAY_BACKPORT_WEBHOOK_CUMULATIVE_MAX_CHARS` | `32000` | Bound on `thread_context_cumulative`; oldest entries dropped first |

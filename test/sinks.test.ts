@@ -6,6 +6,7 @@ import { configureLog, redact, clearSecrets } from "../src/log";
 import { ExecSink, HOOK_ENV_PASSTHROUGH, hookEnv } from "../src/sinks/exec";
 import { FileSink, appendLine, formatLifecycleLine } from "../src/sinks/file";
 import { WebhookSink, backoffMs, isRetryableStatus } from "../src/sinks/webhook";
+import { tailFile } from "../src/tail";
 import { CHANNEL, SENDER } from "./helpers/acp-client";
 import { tmpDir } from "./helpers/tmp";
 
@@ -67,6 +68,27 @@ describe("file sink", () => {
     const blocked = join(t.dir, "file-not-dir");
     writeFileSync(blocked, "x");
     expect(await new FileSink({ path: join(blocked, "d.jsonl") }).deliver(delivery())).toBe(false);
+  });
+
+  test("file.content_max_chars: uncapped by default, caps and flags when set, and tail parses both lines", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "deliveries.jsonl");
+    const long = "y".repeat(2000);
+    expect(await new FileSink({ path }).deliver(delivery(long))).toBe(true);
+    expect(await new FileSink({ path, contentMaxChars: 100 }).deliver(delivery(long))).toBe(true);
+
+    const printed: string[] = [];
+    await tailFile({ path, write: (l) => printed.push(l), follow: false, lines: 10 });
+    expect(printed.length).toBe(2);
+
+    const whole = JSON.parse(printed[0]!.slice("MENTION|".length));
+    expect(whole.content).toBe(long);
+    expect(whole.truncated).toBeUndefined();
+
+    const capped = JSON.parse(printed[1]!.slice("MENTION|".length));
+    expect(capped.content).toBe("y".repeat(100));
+    expect(capped.truncated).toBe(true);
   });
 
   test("a system prompt (or buzz env file) write that fails does not suppress the EVENT|session|new| lifecycle line", () => {

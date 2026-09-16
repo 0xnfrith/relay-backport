@@ -68,7 +68,11 @@ export function threadRoot(ev: Pick<EventLike, "id" | "tags">): string {
   return ev.id;
 }
 
-/** The `MENTION|{json}` payload. Field order and truncation are the contract. */
+/**
+ * The `MENTION|{json}` payload. Field order is the contract: an untruncated
+ * line is byte-identical to every version since v0.1. `truncated` is present
+ * only when a cap actually cut the content short.
+ */
 export type MentionLine = {
   kind: number;
   from: string;
@@ -77,26 +81,36 @@ export type MentionLine = {
   id: string;
   tags: string[][];
   rootId?: string;
+  truncated?: true;
 };
 
-export const MENTION_CONTENT_MAX = 400;
 export const UNKNOWN_SENDER = "unknown";
 
-export function buildMentionLine(ev: EventLike): MentionLine {
+/**
+ * `content` is delivered whole by default. `maxChars` > 0 caps it — and a cap
+ * that actually bites sets `truncated: true`, so a consumer can tell a short
+ * message from a clipped one. 0 (the default) means unlimited: the MENTION
+ * line is the delivery channel into a session, not a preview of it, so
+ * dropping the tail of a long message drops instructions.
+ */
+export function buildMentionLine(ev: EventLike, maxChars = 0): MentionLine {
   const rootId = rootIdOf(ev);
+  const full = ev.content ?? "";
+  const capped = maxChars > 0 && full.length > maxChars;
   return {
     kind: ev.kind,
     from: ev.pubkey ? ev.pubkey.slice(0, 8) : UNKNOWN_SENDER,
     h: channelOf(ev),
-    content: (ev.content ?? "").slice(0, MENTION_CONTENT_MAX),
+    content: capped ? full.slice(0, maxChars) : full,
     id: ev.id,
     tags: ev.tags,
     ...(rootId ? { rootId } : {}),
+    ...(capped ? { truncated: true as const } : {}),
   };
 }
 
-export function formatMentionLine(ev: EventLike): string {
-  return `MENTION|${JSON.stringify(buildMentionLine(ev))}`;
+export function formatMentionLine(ev: EventLike, maxChars = 0): string {
+  return `MENTION|${JSON.stringify(buildMentionLine(ev, maxChars))}`;
 }
 
 /** The JSON the webhook POSTs and the exec hook reads on stdin. */

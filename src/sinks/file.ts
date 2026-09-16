@@ -4,7 +4,7 @@
 // ACP stream: `relay-backport tail` follows the file and prints exactly
 // those lines, so a Claude Code Monitor tool consumes them unchanged.
 //
-//   MENTION|{kind, from (8 hex | "unknown"), h, content (≤400 chars), id, tags, rootId?}
+//   MENTION|{kind, from (8 hex | "unknown"), h, content, id, tags, rootId?, truncated?}
 //   EVENT|session|new|<session id>
 //   EVENT|session|new|<session id>|<absolute path to the system prompt file>
 //   EVENT|session|cancel|<session id>
@@ -12,7 +12,9 @@
 //
 // Each MENTION|/EVENT| line is a single O_APPEND write to a file opened per
 // line, mode 0600, so concurrent writers interleave whole lines and a
-// rotated or deleted file is simply recreated.
+// rotated or deleted file is simply recreated. `content` carries the message
+// whole unless `file.content_max_chars` caps it, in which case the line also
+// carries `"truncated": true`.
 //
 // Two more files this sink can write, both 0600 and atomic (write to a
 // sibling temp file, then rename over the target so a reader never sees a
@@ -44,6 +46,8 @@ export type FileSinkOptions = {
   systemPrompt?: boolean;
   /** When set, (re)write the present `BUZZ_*` vars here on every session/new. */
   buzzEnvFile?: string;
+  /** Cap the MENTION line's `content` at this many characters. 0 (default) = unlimited. */
+  contentMaxChars?: number;
   /** Where the Buzz-injected env comes from. Default `process.env`. */
   env?: Record<string, string | undefined>;
 };
@@ -91,6 +95,7 @@ export class FileSink implements Sink {
   private readonly systemPromptEnabled: boolean;
   private readonly buzzEnvFile: string | undefined;
   private readonly env: Record<string, string | undefined>;
+  private readonly contentMaxChars: number;
 
   constructor(opts: FileSinkOptions) {
     this.path = opts.path;
@@ -98,11 +103,12 @@ export class FileSink implements Sink {
     this.systemPromptEnabled = opts.systemPrompt ?? true;
     this.buzzEnvFile = opts.buzzEnvFile;
     this.env = opts.env ?? process.env;
+    this.contentMaxChars = opts.contentMaxChars ?? 0;
   }
 
   async deliver(delivery: Delivery): Promise<boolean> {
     try {
-      appendLine(this.path, formatMentionLine(delivery.event));
+      appendLine(this.path, formatMentionLine(delivery.event, this.contentMaxChars));
       log.info("file delivered", { event: delivery.event.id, path: this.path });
       return true;
     } catch (err) {

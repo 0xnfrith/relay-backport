@@ -16,6 +16,8 @@ export type SinkName = (typeof SINK_NAMES)[number];
 
 export const DEFAULT_SINKS: SinkName[] = ["file"];
 export const DEFAULT_FILE_NAME = "deliveries.jsonl";
+/** 0 = deliver the message text whole; see `buildMentionLine`. */
+export const DEFAULT_FILE_CONTENT_MAX_CHARS = 0;
 export const DEFAULT_TAIL_CURSOR_NAME = "tail.cursor";
 export const DEFAULT_WEBHOOK_TIMEOUT_MS = 8000;
 export const DEFAULT_WEBHOOK_ATTEMPTS = 3;
@@ -42,6 +44,8 @@ export type FileConfig = {
   systemPrompt: boolean;
   /** When set, (re)write the present Buzz-injected env vars here on every session/new. Default unset (off). */
   buzzEnvFile?: string;
+  /** Cap the MENTION line's `content` at this many characters. 0 (default) = unlimited. */
+  contentMaxChars: number;
 };
 
 export type WebhookConfig = {
@@ -115,7 +119,7 @@ export type RawConfig = {
   sinks?: string[] | string;
   log_format?: string;
   delivery_wait_ms?: number | string;
-  file?: { path?: string; system_prompt?: boolean | string; buzz_env_file?: string };
+  file?: { path?: string; system_prompt?: boolean | string; buzz_env_file?: string; content_max_chars?: number | string };
   webhook?: {
     url?: string;
     bearer_file?: string;
@@ -186,11 +190,13 @@ export function rawFromEnv(env: EnvMap): RawConfig {
   const file = get("FILE");
   const fileSystemPrompt = get("FILE_SYSTEM_PROMPT");
   const fileBuzzEnvFile = get("FILE_BUZZ_ENV_FILE");
-  if (file || fileSystemPrompt !== undefined || fileBuzzEnvFile) {
+  const fileContentMaxChars = get("FILE_CONTENT_MAX_CHARS");
+  if (file || fileSystemPrompt !== undefined || fileBuzzEnvFile || fileContentMaxChars !== undefined) {
     raw.file = {};
     if (file) raw.file.path = file;
     if (fileSystemPrompt !== undefined) raw.file.system_prompt = fileSystemPrompt;
     if (fileBuzzEnvFile) raw.file.buzz_env_file = fileBuzzEnvFile;
+    if (fileContentMaxChars !== undefined) raw.file.content_max_chars = fileContentMaxChars;
   }
   const url = get("WEBHOOK_URL");
   const bearer = get("WEBHOOK_BEARER_FILE");
@@ -351,6 +357,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       path: resolve(raw.file?.path?.trim() || join(stateDir, DEFAULT_FILE_NAME)),
       systemPrompt: toBool(raw.file?.system_prompt, true, "file.system_prompt"),
       buzzEnvFile: raw.file?.buzz_env_file?.trim() ? resolve(raw.file.buzz_env_file.trim()) : undefined,
+      contentMaxChars: toInt(raw.file?.content_max_chars, DEFAULT_FILE_CONTENT_MAX_CHARS, "file.content_max_chars", 0),
     };
   }
 
@@ -423,7 +430,9 @@ export function describeConfig(cfg: Config): Record<string, unknown> {
     sinks: cfg.sinks,
     delivery_wait_ms: cfg.deliveryWaitMs,
     relay: cfg.relayUrl || null,
-    file: cfg.file ? { path: cfg.file.path, system_prompt: cfg.file.systemPrompt, buzz_env_file: cfg.file.buzzEnvFile ?? null } : null,
+    file: cfg.file
+      ? { path: cfg.file.path, system_prompt: cfg.file.systemPrompt, buzz_env_file: cfg.file.buzzEnvFile ?? null, content_max_chars: cfg.file.contentMaxChars }
+      : null,
     webhook: cfg.webhook
       ? {
           url: cfg.webhook.url,

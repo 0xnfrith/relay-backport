@@ -5,8 +5,8 @@
 // the standing system prompt. That is exactly the material a context-window
 // question is asked about ("what did the agent actually read this turn, and
 // how big is the window now?"), and it is otherwise invisible: the file sink
-// truncates content to 400 chars and the webhook sink POSTs into someone
-// else's server.
+// carries only the mention itself (and whatever `file.content_max_chars`
+// leaves of it) and the webhook sink POSTs into someone else's server.
 //
 // `relay-backport observe` runs a small server next to the harness. The
 // existing `webhook` sink POSTs to its `/ingest`; the page at `/` renders
