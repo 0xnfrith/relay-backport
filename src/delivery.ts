@@ -121,13 +121,15 @@ export type DeliveryPayload = {
   /** The `session/new` system prompt, verbatim — only when the sink asked for it. */
   system_prompt?: string;
   /**
-   * Every `<thread-context>` block this ACP session has carried, oldest first,
-   * for a receiver that keeps no state of its own. Only in `cumulative` mode;
+   * Every `<thread-context>` block this ACP session has carried AND every
+   * mention already delivered in it, oldest first, for a receiver that keeps
+   * no state of its own. The current turn's own mention is not repeated here
+   * — it is already in `prompt` and `text`. Only in `cumulative` mode;
    * absent in the default `delta` mode, which leaves the payload byte-identical
    * to 0.2.x. `prompt` is never rewritten — this is additive.
    */
   thread_context_cumulative?: string;
-  /** True when the bound dropped the oldest blocks from `thread_context_cumulative`. */
+  /** True when the bound dropped the oldest entries from `thread_context_cumulative`. */
   thread_context_truncated?: boolean;
 };
 

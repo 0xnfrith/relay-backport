@@ -4,14 +4,15 @@
 // receiver must be idempotent on `event_id`).
 //
 // In `cumulative` thread-context mode it also keeps a per-session ledger of
-// the `<thread-context>` blocks the harness has sent, and carries the whole
-// accumulation in `thread_context_cumulative` — see src/thread-context.ts for
-// why a stateless receiver needs that and a long-lived agent does not.
+// the `<thread-context>` blocks the harness has sent AND of the mentions it
+// has already delivered, and carries the whole accumulation in
+// `thread_context_cumulative` — see src/thread-context.ts for why a stateless
+// receiver needs both and a long-lived agent needs neither.
 import { readFileSync } from "node:fs";
 import type { WebhookConfig } from "../config";
 import { buildPayload, type Delivery } from "../delivery";
 import { log, registerSecret } from "../log";
-import { extractThreadContext, ThreadContextLedger } from "../thread-context";
+import { extractThreadContext, formatDeliveredEvent, ThreadContextLedger } from "../thread-context";
 import type { Sink } from "./index";
 
 export function isRetryableStatus(status: number): boolean {
@@ -69,13 +70,25 @@ export class WebhookSink implements Sink {
    * carries is recorded FIRST, so the field always includes the current turn's
    * context: one field the receiver can take whole, rather than one it has to
    * splice onto `prompt` itself.
+   *
+   * The delivered mention is recorded LAST, after the payload's accumulation
+   * has been read — this turn's own text is already in `prompt`, so it belongs
+   * to turns N+1.. and not to this one. Block before event, so the compound
+   * (kind, event id) dedup never sees the two lines collide.
    */
   payloadFor(delivery: Delivery) {
     if (!this.ledger) return buildPayload(delivery, { includeSystemPrompt: this.cfg.includeSystemPrompt });
     const sessionId = delivery.session.id;
     const block = extractThreadContext(delivery.prompt);
-    if (block) this.ledger.append(sessionId, { event_id: delivery.event.id, at: delivery.receivedAt, text: block });
-    const acc = this.ledger.accumulated(sessionId);
+    if (block)
+      this.ledger.append(sessionId, { event_id: delivery.event.id, at: delivery.receivedAt, text: block, kind: "block" });
+    const acc = this.ledger.accumulated(sessionId, { excludeEvent: delivery.event.id });
+    this.ledger.append(sessionId, {
+      event_id: delivery.event.id,
+      at: delivery.receivedAt,
+      text: formatDeliveredEvent(delivery.event),
+      kind: "event",
+    });
     return buildPayload(delivery, {
       includeSystemPrompt: this.cfg.includeSystemPrompt,
       threadContextCumulative: acc.text || undefined,
