@@ -2,10 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { configureLog } from "../src/log";
 import {
   DEFAULT_BIND,
+  MAX_INGEST_BYTES,
   RingBuffer,
   SessionLedger,
   byteLength,
   estimateTokens,
+  isLoopbackHost,
   parsePayload,
   renderPage,
   startObserveServer,
@@ -190,6 +192,36 @@ describe("/ingest validation", () => {
     expect(await second.json()).toEqual({ ok: true, seq: 2 });
   });
 
+  test("a body over the cap is 413 and is never buffered", async () => {
+    const s = serve();
+    const huge = JSON.stringify({ event_id: EVENT_ID, prompt: "X".repeat(MAX_INGEST_BYTES + 1024) });
+    expect(huge.length).toBeGreaterThan(MAX_INGEST_BYTES);
+    const res = await post(s.port, huge);
+    expect(res.status).toBe(413);
+    expect(s.records()).toEqual([]);
+    expect(s.sessions()).toEqual([]);
+    // A streamed body that declares no content-length is capped the same way:
+    // Bun's own maxRequestBodySize does not stop a chunked POST.
+    const chunked = await fetch(`http://${DEFAULT_BIND}:${s.port}/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      duplex: "half",
+      body: new ReadableStream<Uint8Array>({
+        start(c) {
+          const chunk = new TextEncoder().encode("X".repeat(64 * 1024));
+          for (let i = 0; i < 24; i++) c.enqueue(chunk); // 1.5 MiB, no length header
+          c.close();
+        },
+      }),
+    } as RequestInit);
+    expect(chunked.status).toBe(413);
+    expect(s.records()).toEqual([]);
+
+    // …and a body just under the cap still goes through.
+    const ok = await post(s.port, payload({ prompt: "P".repeat(1000) }));
+    expect(ok.status).toBe(200);
+  });
+
   test("unknown paths are 404 and GET /ingest is not accepted", async () => {
     const s = serve();
     expect((await fetch(`http://${DEFAULT_BIND}:${s.port}/nope`)).status).toBe(404);
@@ -282,5 +314,64 @@ describe("the page", () => {
   test("the buffer size is inlined, not fetched", () => {
     const page = renderPage({ buffer: 42 });
     expect(page).toContain('"buffer":42');
+  });
+
+  test("nothing in the page builds DOM from a string, so a crafted payload cannot inject markup", async () => {
+    const page = renderPage({ buffer: 10 });
+    for (const sink of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"]) {
+      expect(page).not.toContain(sink);
+    }
+    // The one inlined JSON literal cannot close the script element.
+    expect(renderPage({ buffer: 10 })).not.toMatch(/<\/script>\s*var BOOT/);
+
+    // A hostile delivery round-trips as data, verbatim, in every free-text field.
+    const xss = `</script><img src=x onerror=alert(1)><script>`;
+    const s = serve();
+    const res = await post(
+      s.port,
+      payload({
+        prompt: xss,
+        system_prompt: xss,
+        text: xss,
+        relay: xss,
+        session: { id: xss, cwd: xss, title: xss },
+        tags: [["h", xss]],
+      }),
+    );
+    expect(res.status).toBe(200);
+    const rec = s.records()[0]!;
+    expect(rec.prompt).toBe(xss);
+    expect(rec.system_prompt).toBe(xss);
+    expect(rec.session_title).toBe(xss);
+    // /records is served as JSON, never sniffed as HTML.
+    const json = await fetch(`http://${DEFAULT_BIND}:${s.port}/records`);
+    expect(json.headers.get("content-type")).toContain("application/json");
+    // The SSE frame stays one frame: JSON.stringify escapes the newlines that delimit it.
+    expect(JSON.stringify(rec)).not.toContain("\n");
+  });
+});
+
+describe("bind", () => {
+  test("loopback is recognised; a routable address is not", () => {
+    for (const h of ["127.0.0.1", "127.1.2.3", "localhost", "::1", "[::1]", "LOCALHOST"]) {
+      expect(isLoopbackHost(h)).toBe(true);
+    }
+    for (const h of ["0.0.0.0", "::", "192.168.1.8", "10.0.0.5", "example.com"]) {
+      expect(isLoopbackHost(h)).toBe(false);
+    }
+  });
+
+  test("binding off loopback logs a warning; the default does not", () => {
+    const lines: string[] = [];
+    configureLog({ writer: (l: string) => lines.push(l), level: "debug" });
+    try {
+      startObserveServer({ host: DEFAULT_BIND, port: 0 }).stop();
+      expect(lines.join("\n")).not.toContain("NON-LOOPBACK");
+      lines.length = 0;
+      startObserveServer({ host: "0.0.0.0", port: 0 }).stop();
+      expect(lines.join("\n")).toContain("NON-LOOPBACK");
+    } finally {
+      configureLog({ writer: () => {} });
+    }
   });
 });

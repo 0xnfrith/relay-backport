@@ -94,7 +94,12 @@ export type SessionTotals = {
   session_id: string;
   turns: number;
   prompt_tokens: number;
-  /** Counted ONCE per distinct system prompt, not once per turn — the harness sends it on session/new only. */
+  /**
+   * Counted once per *change*, not once per turn — the harness sends it on
+   * session/new only and the sink re-attaches it to every POST. A session that
+   * alternates S → S' → S is charged for each switch: the block really did
+   * change, and the ledger keeps only the last one seen, not a set.
+   */
   system_prompt_tokens: number;
   total_tokens: number;
   first_seen: number;
@@ -230,6 +235,54 @@ export const DEFAULT_PORT = 7479;
 export const DEFAULT_BUFFER = 200;
 export const DEFAULT_BIND = "127.0.0.1";
 
+/**
+ * The largest body `/ingest` will read: 1 MiB. A delivery is a per-turn prompt
+ * plus a standing system prompt — 20-40 KB is the realistic ceiling — and every
+ * accepted body is retained in the ring buffer, so an uncapped POST is an
+ * uncapped allocation multiplied by `--buffer`. Bun's own default is 128 MB.
+ */
+export const MAX_INGEST_BYTES = 1024 * 1024;
+
+/**
+ * Read a request body, refusing at `max` bytes. Bun's `maxRequestBodySize` is
+ * set too, but it does not stop a chunked POST that declares no length, so the
+ * cap is counted here as the body streams in — nothing over the limit is ever
+ * fully held. Returns undefined when the body is too large.
+ */
+export async function readCappedBody(req: Request, max: number): Promise<string | undefined> {
+  const declared = Number(req.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > max) return undefined;
+  const body = req.body;
+  if (!body) return "";
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let out = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      // Drain and discard the rest rather than cancelling: cancelling mid-body
+      // leaves the keep-alive connection desynchronised and the sender's NEXT
+      // delivery is read as garbage. Nothing over the cap is retained.
+      out = "";
+      while (!(await reader.read()).done) {
+        /* discard */
+      }
+      return undefined;
+    }
+    out += decoder.decode(value, { stream: true });
+  }
+  return out + decoder.decode();
+}
+
+/** Loopback hosts the page is safe on; anything else is a routable listener. */
+export function isLoopbackHost(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "localhost" || h === "::1" || h === "::ffff:127.0.0.1" || /^127\./.test(h);
+}
+
 export type ObserveServerOptions = {
   host?: string;
   port?: number;
@@ -274,9 +327,18 @@ export function startObserveServer(opts: ObserveServerOptions = {}): ObserveServ
 
   const page = renderPage({ buffer: capacity });
 
+  const host = opts.host ?? DEFAULT_BIND;
+  if (!isLoopbackHost(host)) {
+    log.warn("observe is binding to a NON-LOOPBACK address: it has no authentication and serves every prompt the agent received in full", {
+      host,
+      advice: "bind 127.0.0.1 unless you control the network",
+    });
+  }
+
   const server = Bun.serve({
-    hostname: opts.host ?? DEFAULT_BIND,
+    hostname: host,
     port: opts.port ?? DEFAULT_PORT,
+    maxRequestBodySize: MAX_INGEST_BYTES,
     fetch(req) {
       const url = new URL(req.url);
       if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
@@ -307,9 +369,15 @@ export function startObserveServer(opts: ObserveServerOptions = {}): ObserveServ
         });
       }
       if (req.method === "POST" && url.pathname === "/ingest") {
-        return req
-          .json()
-          .then((body) => {
+        return readCappedBody(req, MAX_INGEST_BYTES)
+          .then((text) => {
+            if (text === undefined) return new Response("payload too large", { status: 413 });
+            let body: unknown;
+            try {
+              body = JSON.parse(text);
+            } catch {
+              return new Response("bad json", { status: 400 });
+            }
             // Validate before allocating: junk must never burn a sequence number.
             const parsed = parsePayload(body, now());
             if (!parsed) return new Response("bad payload", { status: 400 });
@@ -324,7 +392,7 @@ export function startObserveServer(opts: ObserveServerOptions = {}): ObserveServ
     },
   });
 
-  log.info("observe page listening", { host: opts.host ?? DEFAULT_BIND, port: server.port, buffer: capacity });
+  log.info("observe page listening", { host, port: server.port, buffer: capacity, max_body_bytes: MAX_INGEST_BYTES });
 
   return {
     port: server.port ?? opts.port ?? DEFAULT_PORT,

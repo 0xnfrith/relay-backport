@@ -15,6 +15,11 @@ Context engineering is hard to do blind. The harness builds a prompt, hands it o
 - A **session context** sidebar: one row per ACP session with a cumulative token estimate. The standing system prompt is counted **once per session** (again only if its text changes), not once per turn — the harness sends it on `session/new` only, and the webhook sink re-attaches it to every POST, so per-turn counting would overstate a session by 20-40 KB per turn. Totals are kept server-side and survive ring-buffer eviction.
 - README: an "Observe: see what the agent sees" section with the Buzz Desktop custom-harness `env` example (`RELAY_BACKPORT_SINKS=file,webhook`, `RELAY_BACKPORT_WEBHOOK_URL=http://127.0.0.1:7479/ingest`) and the note that the page shows only what the harness accepted — the respond-to gate is upstream and invisible here. A security note on the one command that listens on a socket.
 
+### Security
+
+- `/ingest` caps a request body at **1 MiB** (`413` over it), counted as the body streams so a chunked POST that declares no `content-length` is capped too; an oversized body is drained and discarded rather than cancelled, so the sender's next delivery on the same keep-alive connection still parses. Without the cap a single POST could be held in full in the ring buffer.
+- `--bind` to a non-loopback address logs a warning at startup. The page has no authentication and serves every prompt verbatim.
+
 ### Notes
 
 - No sink, payload, config key or `MENTION|` line changes: `observe` is a consumer of the existing `webhook` sink, and the `acp` path never starts it.
