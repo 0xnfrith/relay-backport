@@ -2,6 +2,29 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.2.2 — 2026-09-16
+
+**`relay-backport observe`: a loopback page showing what the agent sees.**
+
+Context engineering is hard to do blind. The harness builds a prompt, hands it over, and after that the material is invisible — the `file` sink caps content at 400 characters and the `webhook` sink POSTs it into someone else's server. `observe` renders it: the full prompt as built, the standing system prompt, and a per-session token estimate so the growth of the window across a thread is something you can look at.
+
+### Added
+
+- **`relay-backport observe [--port N] [--buffer N] [--bind ADDR]`** (default `127.0.0.1:7479`, buffer 200): serves one self-contained HTML page at `/` — no external script, stylesheet, font or CDN, and the only connection it opens is its own SSE stream at `/events` — plus `POST /ingest`, which takes the `webhook` sink's JSON payload unchanged. A body that is not a delivery is `400` and never consumes a sequence number. `GET /records` and `GET /sessions` expose the same data as JSON. Loopback only, no authentication, no persistence.
+- The page shows each delivery as a two-column card, newest first: **left** the relay event (kind, id, thread root, `event_source`, content, tags), **right** what the agent would see — the full prompt verbatim, the session's system prompt when the sink attached one, and a Buzz identity block (relay, session id, cwd, title, sender, channel), each collapsible with a byte count and an approximate token count (`chars / 4`) in its summary line.
+- A **session context** sidebar: one row per ACP session with a cumulative token estimate. The standing system prompt is counted **once per session** (again only if its text changes), not once per turn — the harness sends it on `session/new` only, and the webhook sink re-attaches it to every POST, so per-turn counting would overstate a session by 20-40 KB per turn. Totals are kept server-side and survive ring-buffer eviction.
+- README: an "Observe: see what the agent sees" section with the Buzz Desktop custom-harness `env` example (`RELAY_BACKPORT_SINKS=file,webhook`, `RELAY_BACKPORT_WEBHOOK_URL=http://127.0.0.1:7479/ingest`) and the note that the page shows only what the harness accepted — the respond-to gate is upstream and invisible here. A security note on the one command that listens on a socket.
+
+### Security
+
+- `/ingest` caps a request body at **1 MiB** (`413` over it), counted as the body streams so a chunked POST that declares no `content-length` is capped too; an oversized body is drained and discarded rather than cancelled, so the sender's next delivery on the same keep-alive connection still parses. Without the cap a single POST could be held in full in the ring buffer.
+- `--bind` to a non-loopback address logs a warning at startup. The page has no authentication and serves every prompt verbatim.
+
+### Notes
+
+- No sink, payload, config key or `MENTION|` line changes: `observe` is a consumer of the existing `webhook` sink, and the `acp` path never starts it.
+- Ported from the v0.1 observe tap (ring buffer, SSE replay, `/ingest`) without its relay-socket half — v0.2 has no watch daemon, so there are no verdicts and no second lane: everything the page shows was, by definition, accepted.
+
 ## 0.2.1 — 2026-09-06
 
 **Zero-setup consumer handoff: the standing system prompt and the agent's own Buzz identity now reach every consumer, not just the per-turn prompt.**

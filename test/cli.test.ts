@@ -110,4 +110,31 @@ describe("main", () => {
     expect(await main(["tail", "--no-follow", "--lines", "1"], once)).toBe(0);
     expect(once.outLines).toEqual(["b"]);
   });
+
+  test("observe serves the page, ingests a delivery and stops on abort", async () => {
+    const ctl = new AbortController();
+    const c = io({}, { signal: ctl.signal });
+    const run = main(["observe", "--port", "0", "--buffer", "5"], c);
+    await waitFor(() => c.outLines.length === 1, 2000, "observe banner");
+    const url = c.outLines[0]!.match(/http:\/\/127\.0\.0\.1:(\d+)\//);
+    expect(url).not.toBeNull();
+    const port = url![1];
+    const page = await fetch(`http://127.0.0.1:${port}/`);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("what the agent would see");
+    const ingest = await fetch(`http://127.0.0.1:${port}/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event_id: "a".repeat(64), prompt: "a prompt", session: { id: "s", cwd: "/tmp" } }),
+    });
+    expect(await ingest.json()).toEqual({ ok: true, seq: 1 });
+    ctl.abort();
+    expect(await run).toBe(0);
+  });
+
+  test("observe rejects a non-numeric or out-of-range --port / --buffer", async () => {
+    expect(await main(["observe", "--port", "nope"], io())).toBe(1);
+    expect(await main(["observe", "--buffer", "0"], io())).toBe(1);
+    expect(HELP).toContain("relay-backport observe");
+  });
 });

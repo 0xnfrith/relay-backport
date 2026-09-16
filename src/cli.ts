@@ -5,11 +5,13 @@
 //                          so a Desktop custom-harness entry can be just the
 //                          command name)
 //   relay-backport tail    follow the file sink and print its lines
+//   relay-backport observe  a loopback page showing what the agent sees
 //
 // Exit codes: 0 ok · 1 config or usage
 import { lines, startAcpServer } from "./acp-server";
 import { ConfigError, describeConfig, loadConfig, type RawConfig } from "./config";
 import { configureLog, log, errMessage } from "./log";
+import { DEFAULT_BIND, DEFAULT_BUFFER, DEFAULT_PORT, startObserveServer } from "./observe";
 import { buildSinks } from "./sinks/index";
 import { tailFile } from "./tail";
 import { NAME, VERSION } from "./version";
@@ -21,6 +23,7 @@ Buzz owns the relay; relay-backport owns delivery.
 USAGE
   ${NAME} [acp] [options]     run the ACP server (what a Buzz harness spawns; the default)
   ${NAME} tail [options]      follow the file sink and print its MENTION|/EVENT| lines
+  ${NAME} observe [options]   serve a loopback page showing what the agent sees
   ${NAME} --help | --version
 
 OPTIONS (all commands)
@@ -38,6 +41,13 @@ OPTIONS (tail)
   --lines N            print the last N lines before following (default 0)
   --no-follow          print and exit
 
+OPTIONS (observe)
+  --port N             listen on this port (default ${DEFAULT_PORT}; 0 picks a free one)
+  --buffer N           deliveries kept for replay (default ${DEFAULT_BUFFER})
+  --bind ADDR          interface to bind (default ${DEFAULT_BIND}; loopback, no auth)
+  Feed it with the webhook sink: RELAY_BACKPORT_SINKS=file,webhook
+  RELAY_BACKPORT_WEBHOOK_URL=http://${DEFAULT_BIND}:${DEFAULT_PORT}/ingest
+
 EXIT CODES
   0 ok · 1 config or usage
 `;
@@ -48,7 +58,7 @@ export type ParsedArgs = {
   flags: Record<string, string | boolean | string[]>;
 };
 
-const VALUE_FLAGS = new Set(["config", "state-dir", "file", "sink", "log-format", "lines"]);
+const VALUE_FLAGS = new Set(["config", "state-dir", "file", "sink", "log-format", "lines", "port", "buffer", "bind"]);
 const BOOL_FLAGS = new Set(["help", "version", "verbose", "no-follow"]);
 const REPEATABLE = new Set(["sink"]);
 
@@ -102,6 +112,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
 function str(v: string | boolean | string[] | undefined): string | undefined {
   return typeof v === "string" ? v : undefined;
+}
+
+/** Parse an integer flag, or throw a usage error naming it. */
+export function intFlag(raw: string | undefined, fallback: number, name: string, min: number): number {
+  if (raw === undefined) return fallback;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < min) throw new ConfigError(`${name} must be an integer >= ${min}`);
+  return n;
 }
 
 export function overridesFromFlags(flags: ParsedArgs["flags"]): RawConfig {
@@ -180,6 +198,32 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
         if (!Number.isFinite(n) || n < 0) throw new ConfigError("--lines must be an integer >= 0");
         log.info("following", { path: cfg.file!.path, lines: n });
         await tailFile({ path: cfg.file!.path, write: (l) => io.out(l), lines: n, follow: args.flags["no-follow"] !== true, signal: io.signal });
+        return 0;
+      }
+      case "observe": {
+        configureLog({ format: str(args.flags["log-format"]) === "json" ? "json" : "text", level: args.flags.verbose === true ? "debug" : "info" });
+        const port = intFlag(str(args.flags.port), DEFAULT_PORT, "--port", 0);
+        const buffer = intFlag(str(args.flags.buffer), DEFAULT_BUFFER, "--buffer", 1);
+        const host = str(args.flags.bind) ?? DEFAULT_BIND;
+        const server = startObserveServer({ host, port, buffer });
+        io.out(`${NAME} observe on http://${host}:${server.port}/ — POST deliveries to http://${host}:${server.port}/ingest`);
+        await new Promise<void>((resolve) => {
+          let stopped = false;
+          const stop = () => {
+            if (stopped) return;
+            stopped = true;
+            process.off("SIGINT", stop);
+            process.off("SIGTERM", stop);
+            server.stop();
+            resolve();
+          };
+          if (io.signal) {
+            if (io.signal.aborted) return stop();
+            io.signal.addEventListener("abort", stop, { once: true });
+          }
+          process.on("SIGINT", stop);
+          process.on("SIGTERM", stop);
+        });
         return 0;
       }
       default:
