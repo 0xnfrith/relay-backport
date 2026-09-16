@@ -2,6 +2,21 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.3.0 — unreleased
+
+### Added
+
+- **`relay-backport tail` keeps a persistent line cursor** (`<state_dir>/tail.cursor`, `--cursor PATH` to move it): the number of lines it has handed to its consumer, advanced after every line and written atomically (temp file + rename, so a crash mid-write leaves the previous value rather than a truncated one). On start the tail resumes from that number instead of from the end of the file, printing `EVENT|catchup|N line(s) written while the tail was down` before it replays the gap. A cursor that is missing, empty or unparsable reads as `0` — an untrustworthy cursor replays rather than skips.
+- Rotation and truncation are detected two ways: fewer lines in the file than the cursor claims (at start), and a changed inode or a shrunken size (while following). Either resets the cursor to `0` and replays from the top.
+
+### Changed
+
+- **The cursor is ON by default, which changes what a fresh `tail` prints.** Before 0.3 a tail started at the end of the file and showed only what arrived next; from 0.3 a tail with no cursor file replays everything already in the file, then follows. This is the point — a Monitor or supervisor restart used to silently drop every mention delivered during the gap. **`--no-cursor` restores the old behaviour exactly**, and is the only mode in which `--lines N` applies; `--lines` with a cursor is a usage error rather than a silently ignored flag, and so is `--cursor` together with `--no-cursor`.
+
+### Notes
+
+- No sink, payload, config-file key or `MENTION|` line changes. The cursor is a `tail` concern only: the `acp` path, the file sink's format and every consumer of it are untouched, and a consumer that never restarts sees no difference.
+
 ## 0.2.2 — 2026-09-16
 
 **`relay-backport observe`: a loopback page showing what the agent sees.**

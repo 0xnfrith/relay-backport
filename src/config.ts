@@ -16,6 +16,7 @@ export type SinkName = (typeof SINK_NAMES)[number];
 
 export const DEFAULT_SINKS: SinkName[] = ["file"];
 export const DEFAULT_FILE_NAME = "deliveries.jsonl";
+export const DEFAULT_TAIL_CURSOR_NAME = "tail.cursor";
 export const DEFAULT_WEBHOOK_TIMEOUT_MS = 8000;
 export const DEFAULT_WEBHOOK_ATTEMPTS = 3;
 export const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
