@@ -185,7 +185,17 @@ export class RelayClient {
   private send(msg: unknown): boolean {
     if (!this.ws || !this.connected) return false;
     try {
-      this.ws.send(JSON.stringify(msg));
+      const frame = JSON.stringify(msg);
+      // Wire trace (debug only). Redacted like every other log line, and the
+      // payload of a signed EVENT/AUTH frame is summarised, never dumped.
+      if (Array.isArray(msg)) {
+        const verb = String(msg[0]);
+        log.debug("ws send", {
+          verb,
+          detail: verb === "REQ" || verb === "CLOSE" ? frame.slice(0, 1200) : `${frame.length}b`,
+        });
+      }
+      this.ws.send(frame);
       return true;
     } catch (err) {
       log.warn("relay send failed", { error: errMessage(err) });
@@ -219,6 +229,13 @@ export class RelayClient {
     }
     if (!Array.isArray(msg) || typeof msg[0] !== "string") return;
     const type = msg[0];
+    log.debug("ws recv", {
+      verb: type,
+      detail:
+        type === "EVENT"
+          ? `sub=${String(msg[1])} kind=${(msg[2] as Event | undefined)?.kind ?? "?"}`
+          : raw.slice(0, 400),
+    });
 
     if (type === "AUTH") {
       const challenge = typeof msg[1] === "string" ? msg[1] : "";

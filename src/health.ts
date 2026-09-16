@@ -22,6 +22,7 @@ export type HealthSnapshot = {
     dropped_self: number;
     dropped_duplicate: number;
     dropped_kind: number;
+    dropped_not_mentioned: number;
     reconnects: number;
   };
   allowlist: {

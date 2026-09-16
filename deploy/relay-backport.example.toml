@@ -40,6 +40,24 @@ replay_window_max = 86400
 health_port = 0
 health_host = "127.0.0.1"
 
+# Only watch these channels. Empty (the default) watches every channel the key
+# belongs to. Relays admit REQ frames per authenticated principal, so a second
+# daemon running on the same key as an existing one should name just the
+# channels it needs or both will be throttled.
+channels = []
+
+# The observe tap: a loopback page mirroring every event this daemon receives
+# and what it decided. 0 = off.
+observe_port = 0
+observe_host = "127.0.0.1"
+observe_buffer = 200
+
+# Also watch `channels` without the mention filter, so messages that do NOT
+# mention this key are received and shown as `dropped_not_mentioned`. Off by
+# default: the mention-scoped subscriptions never deliver those events at all,
+# so turning this on is a real increase in relay traffic.
+observe_all = false
+
 # Control channel: loopback TCP. 0 = pick any free port (the CLI finds it via
 # STATE_DIR/control.port).
 control_port = 7477

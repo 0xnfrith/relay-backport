@@ -134,7 +134,7 @@ These talk to the running daemon over the control channel; they never edit the s
 
 1. **Connects and authenticates** (NIP-42): answers the relay's `AUTH` challenge with a signed kind 22242. An open relay that never challenges works too.
 2. **Discovers membership** the way Buzz's own harness does: kind 39002 group-members events with `#p` = our key, minus channels whose kind 39000 metadata says `archived`. Re-discovered every `rediscovery_interval` seconds, and immediately on a membership notification (kinds 44100/44101, 9000/9001) — an invite just works, and a mention in the same second as the invite is caught.
-3. **Subscribes** with one `REQ` covering the discovered channels: `#p` mentions of our key; owner-authored messages when `mention_text` is set; our own replies when `reactions` is on. The subscription is re-asserted on every rediscovery because relay-side subscriptions have been observed to die silently while the socket stays up.
+3. **Subscribes** with one `REQ` per discovered channel (`watch:<channel-id>`), each filtered to that channel alone: `#p` mentions of our key; owner-authored messages when `mention_text` is set; our own replies when `reactions` is on. One REQ per channel is deliberate: measured against a live Buzz relay, a REQ whose `#h` lists many channels is accepted, replayed and EOSE'd normally but never receives a live push, while per-channel REQs over the same traffic do. (The mechanism is inferred rather than confirmed — it is consistent with a relay resolving live-routing scope from a single channel id.) REQ frames are paced (60 ms apart) to stay inside the relay's per-principal admission budget, a closed subscription is re-subscribed with backoff, and the whole set is re-asserted on every rediscovery because relay-side subscriptions have been observed to die silently while the socket stays up.
 4. **Matches mentions**: a `p` tag naming our key counts from anyone. A literal `mention_text` (whole word, case-insensitive) counts only from the owner — a bot quoting "@name" in prose is not a callback.
 5. **Deduplicates** by event id: in memory for the run, and on disk (`seen.txt`) once every sink accepted the event, so a restart never redelivers what was already handled.
 6. **Replays only the gap** after a restart: a heartbeat (`cursor.txt`, every `heartbeat_seconds`, only while connected) records the last known-good moment; on reconnect the subscription starts from that minus a minute of slack, never further back than `replay_window_max` (default 24 h), never less than two minutes.
@@ -232,6 +232,31 @@ CLI flags for `watch`: `--config`, `--relay`, `--key-file`, `--state-dir`, `--ow
   "reactions": { "enabled": false, "pending": 0 }, "control_port": 7477 }
 ```
 
+## Observing what the daemon sees
+
+`observe_port` starts a page on loopback that mirrors, live, every event this daemon receives and what it decided to do with it — for context-engineering the thing downstream of it.
+
+```sh
+relay-backport watch --config ./relay-backport.toml --observe 7479
+# then open http://127.0.0.1:7479
+```
+
+Each record shows the raw event JSON, a verdict chip with its reason, the `MENTION|{…}` line exactly as the sinks emitted it (or nothing, when the event was dropped), the channel and thread root, and `delta_ms` — how long the event took to reach you after it was created. Records stream over SSE and the last `observe_buffer` of them replay when the page opens, so a reload loses nothing.
+
+On startup the daemon replays a short window of recent events, so a restart within that window re-shows events you have already seen — with a large `delta_ms`, which is how you tell a replay from something that just arrived. A fresh `state_dir` has an empty `seen.txt`, so nothing is deduplicated against a previous run.
+
+The verdicts are the exits of the mention pipeline: `delivered`, `delivery_failed`, `dropped_self`, `dropped_kind`, `dropped_duplicate`, `dropped_not_allowed`, and `dropped_not_mentioned`.
+
+**`dropped_not_mentioned` needs `observe_all`.** The watch subscriptions are scoped by `#p`, so a message that does not mention this key is never delivered to the daemon and cannot be dropped by it. Setting `observe_all = true` adds a channel-wide filter for the configured `channels` so those messages arrive and are shown. It is off by default because it is a real increase in relay traffic.
+
+**Comparing two paths.** The page has a second column fed by `POST /ingest`, which takes the JSON payload the `webhook` sink sends. Point a harness-mode instance's webhook sink at it and the two columns show the same mention as each path sees it — the left one every event and every verdict, the right one the prompt a harness built:
+
+```sh
+RELAY_BACKPORT_SINKS=webhook RELAY_BACKPORT_WEBHOOK_URL='http://127.0.0.1:7479/ingest?label=harness'   relay-backport acp
+```
+
+Loopback only, no authentication, no persistence: it mirrors traffic the operator already receives. Do not bind it to a routable address.
+
 ## Sinks
 
 - **`stdout`** — the Claude Code Monitor contract above. Nothing else is ever written to stdout.
@@ -240,6 +265,8 @@ CLI flags for `watch`: `--config`, `--relay`, `--key-file`, `--state-dir`, `--ow
 - **`acp`** — *scaffold only*. [`src/sinks/acp.ts`](src/sinks/acp.ts) holds the interface a full ACP client would implement (`initialize` → `session/new` → `session/prompt` over the agent's stdio) and a stub that logs "not implemented" and rejects every delivery, so a mention routed only to it is not marked delivered. Listed as *possible, untested* above.
 
 ## Architecture
+
+![relay-backport architecture](docs/architecture.svg)
 
 ```mermaid
 flowchart LR
@@ -287,7 +314,7 @@ flowchart LR
   acp -.-> agent
 ```
 
-A hand-drawn export of the same diagram lands at `docs/architecture.png` once it exists; the Mermaid block above is the rendered reference, and [`docs/architecture.md`](docs/architecture.md) has the sequence view.
+A hand-drawn export of the same diagram is embedded above (`docs/architecture.svg`, with a rendered `docs/architecture.png` alongside it); the Mermaid block is the plain-text reference, and [`docs/architecture.md`](docs/architecture.md) has the sequence view.
 
 ## Deploy
 

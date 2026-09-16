@@ -18,6 +18,7 @@ export const DEFAULT_WEBHOOK_ATTEMPTS = 3;
 export const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 export const DEFAULT_REACTION_SWEEP_S = 30 * 60;
 export const DEFAULT_HEARTBEAT_S = 5;
+export const DEFAULT_OBSERVE_BUFFER = 200;
 
 export class ConfigError extends Error {
   readonly exitCode = 1;
@@ -54,8 +55,15 @@ export type Config = {
   replayWindowMaxSeconds: number;
   heartbeatSeconds: number;
   kinds: number[];
+  /** When non-empty, only these channel ids are watched (discovery still runs). */
+  channels: string[];
   healthPort: number;
   healthHost: string;
+  observePort: number;
+  observeHost: string;
+  observeBuffer: number;
+  /** Also watch the observed channels without the `#p` mention filter. */
+  observeAll: boolean;
   controlPort: number;
   logFormat: LogFormat;
   webhook?: WebhookConfig;
@@ -80,8 +88,13 @@ export type RawConfig = {
   replay_window_max?: number | string;
   heartbeat_seconds?: number | string;
   kinds?: number[] | string;
+  channels?: string[] | string;
   health_port?: number | string;
   health_host?: string;
+  observe_port?: number | string;
+  observe_host?: string;
+  observe_buffer?: number | string;
+  observe_all?: boolean | string;
   control_port?: number | string;
   log_format?: string;
   webhook?: {
@@ -148,8 +161,13 @@ export function rawFromEnv(env: EnvMap): RawConfig {
   set("replay_window_max", trimEnv(env.REPLAY_WINDOW_MAX));
   set("heartbeat_seconds", trimEnv(env.HEARTBEAT_SECONDS));
   set("kinds", trimEnv(env.KINDS));
+  set("channels", trimEnv(env.CHANNELS));
   set("health_port", trimEnv(env.HEALTH_PORT));
   set("health_host", trimEnv(env.HEALTH_HOST));
+  set("observe_port", trimEnv(env.OBSERVE_PORT));
+  set("observe_host", trimEnv(env.OBSERVE_HOST));
+  set("observe_buffer", trimEnv(env.OBSERVE_BUFFER));
+  set("observe_all", trimEnv(env.OBSERVE_ALL));
   set("control_port", trimEnv(env.CONTROL_PORT));
   set("log_format", trimEnv(env.LOG_FORMAT));
   const webhookUrl = trimEnv(env.WEBHOOK_URL);
@@ -285,8 +303,13 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       replayWindowMaxSeconds: DEFAULT_REPLAY_WINDOW_MAX_S,
       heartbeatSeconds: DEFAULT_HEARTBEAT_S,
       kinds: DEFAULT_KINDS,
+      channels: [],
       healthPort: 0,
       healthHost: "127.0.0.1",
+      observePort: 0,
+      observeHost: "127.0.0.1",
+      observeBuffer: DEFAULT_OBSERVE_BUFFER,
+      observeAll: false,
       controlPort,
       logFormat,
       configPath,
@@ -346,6 +369,12 @@ export function loadConfig(opts: LoadOptions = {}): Config {
   const healthPort = toInt(raw.health_port, 0, "health_port");
   if (healthPort > 65535) throw new ConfigError("health_port must be <= 65535");
 
+  const observePort = toInt(raw.observe_port, 0, "observe_port");
+  if (observePort > 65535) throw new ConfigError("observe_port must be <= 65535");
+  const observeBuffer = toInt(raw.observe_buffer, DEFAULT_OBSERVE_BUFFER, "observe_buffer");
+  if (observeBuffer < 1) throw new ConfigError("observe_buffer must be >= 1");
+  const channels = (toList(raw.channels as string[] | string | undefined) ?? []).map((c) => c.trim().toLowerCase()).filter(Boolean);
+
   const mentionText = raw.mention_text?.trim() || undefined;
   if (mentionText && !ownerPubkey) {
     throw new ConfigError("mention_text requires owner_pubkey (text mentions are owner-only)");
@@ -402,8 +431,13 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     replayWindowMaxSeconds: toInt(raw.replay_window_max, DEFAULT_REPLAY_WINDOW_MAX_S, "replay_window_max", 0),
     heartbeatSeconds: toInt(raw.heartbeat_seconds, DEFAULT_HEARTBEAT_S, "heartbeat_seconds", 1),
     kinds,
+    channels,
     healthPort,
     healthHost: raw.health_host?.trim() || "127.0.0.1",
+    observePort,
+    observeHost: raw.observe_host?.trim() || "127.0.0.1",
+    observeBuffer,
+    observeAll: toBool(raw.observe_all, false, "observe_all"),
     controlPort,
     logFormat,
     webhook,
@@ -426,7 +460,10 @@ export function describeConfig(cfg: Config): Record<string, unknown> {
     reactions: cfg.reactions,
     rediscovery_interval: cfg.rediscoveryIntervalSeconds,
     replay_window_max: cfg.replayWindowMaxSeconds,
+    channels: cfg.channels.length ? cfg.channels : "all",
     health: cfg.healthPort ? `${cfg.healthHost}:${cfg.healthPort}` : null,
+    observe: cfg.observePort ? `${cfg.observeHost}:${cfg.observePort}` : null,
+    observe_all: cfg.observeAll,
     control_port: cfg.controlPort,
     webhook: cfg.webhook ? { url: cfg.webhook.url, bearer: Boolean(cfg.webhook.bearerFile) } : null,
     exec: cfg.exec ? { command: cfg.exec.command, timeout_ms: cfg.exec.timeoutMs } : null,
