@@ -7,7 +7,7 @@ All notable changes to relay-backport. The format follows [Keep a Changelog](htt
 ### Added
 
 - **`relay-backport tail` keeps a persistent line cursor** (`<state_dir>/tail.cursor`, `--cursor PATH` to move it): the number of lines it has handed to its consumer, advanced after every line and written atomically (temp file + rename, so a crash mid-write leaves the previous value rather than a truncated one). On start the tail resumes from that number instead of from the end of the file, printing `EVENT|catchup|N line(s) written while the tail was down` before it replays the gap. A cursor that is missing, empty or unparsable reads as `0` — an untrustworthy cursor replays rather than skips.
-- Rotation and truncation are detected two ways: fewer lines in the file than the cursor claims (at start), and a changed inode or a shrunken size (while following). Either resets the cursor to `0` and replays from the top.
+- Rotation and truncation are detected two ways: fewer lines in the file than the cursor claims (when the tail places itself against it), and a changed inode or a shrunken size (while following). Either replays from the top. A file that merely goes **missing** — `stat` fails for a transient permission or filesystem error as readily as for a delete — never zeroes the cursor: when it comes back, the tail places itself against the cursor again, so an unchanged file replays nothing and only a genuinely shorter one starts over.
 
 ### Changed
 

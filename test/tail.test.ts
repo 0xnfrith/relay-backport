@@ -223,6 +223,41 @@ describe("tail cursor", () => {
     await f.done;
   });
 
+  test("a file that vanishes and comes back UNCHANGED replays nothing; one that comes back shorter replays", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "d.jsonl");
+    const cur = join(t.dir, "tail.cursor");
+    const three = "1\n2\n3\n";
+    writeFileSync(path, three);
+    const f = followCursor(path, cur);
+    await waitFor(() => readCursor(cur) === 3, 2000, "cursor at 3");
+    expect(f.out.length).toBe(4); // catchup + 3
+
+    // stat() fails for a transient error as readily as for a delete, so a file
+    // that comes back unchanged must NOT replay the whole queue
+    unlinkSync(path);
+    await Bun.sleep(80);
+    writeFileSync(path, three);
+    await Bun.sleep(150);
+    expect(f.out.length).toBe(4);
+    expect(readCursor(cur)).toBe(3);
+
+    // ...but appends after it came back are still delivered
+    appendFileSync(path, "4\n");
+    await waitFor(() => f.out.includes("4"), 2000, "line after the file returned");
+    expect(readCursor(cur)).toBe(4);
+
+    // a genuinely shorter replacement does replay, from the top
+    unlinkSync(path);
+    await Bun.sleep(80);
+    writeFileSync(path, "fresh\n");
+    await waitFor(() => f.out.includes("fresh"), 2000, "shorter replacement replays");
+    await waitFor(() => readCursor(cur) === 1, 2000, "cursor reset to 1");
+    f.stop();
+    await f.done;
+  });
+
   test("--no-cursor (no cursorPath) still follows from the end and writes no cursor file", async () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);
