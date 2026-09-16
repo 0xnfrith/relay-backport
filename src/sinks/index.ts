@@ -7,7 +7,14 @@ import { FileSink } from "./file";
 import { WebhookSink } from "./webhook";
 
 export type LifecycleEvent =
-  | { type: "session-new"; sessionId: string }
+  | {
+      type: "session-new";
+      sessionId: string;
+      /** The `session/new` system prompt, verbatim, or "". Never logged. */
+      systemPrompt?: string;
+      /** Set by the file sink once it has written the system prompt to disk. */
+      systemPromptPath?: string;
+    }
   | { type: "session-cancel"; sessionId: string }
   | { type: "closed" };
 
@@ -32,7 +39,15 @@ export function buildSinks(cfg: Config, opts: SinkFactoryOptions = {}): Sink[] {
     switch (name) {
       case "file":
         if (!cfg.file) throw new Error("file sink selected without file config");
-        sinks.push(new FileSink(cfg.file.path));
+        sinks.push(
+          new FileSink({
+            path: cfg.file.path,
+            stateDir: cfg.stateDir,
+            systemPrompt: cfg.file.systemPrompt,
+            buzzEnvFile: cfg.file.buzzEnvFile,
+            env: opts.env,
+          }),
+        );
         break;
       case "webhook":
         if (!cfg.webhook) throw new Error("webhook sink selected without webhook config");

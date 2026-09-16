@@ -25,12 +25,21 @@ log_format = "text"
 # One MENTION|{json} line per delivery plus EVENT| lifecycle lines.
 # `relay-backport tail` follows it. Default: <state_dir>/deliveries.jsonl.
 # path = "/var/lib/relay-backport/deliveries.jsonl"
+# Write the session's system prompt once to <state_dir>/sessions/<id>.system-prompt.md
+# and name it in the EVENT|session|new|... line. Default: true.
+system_prompt = true
+# (Re)write the harness-injected BUZZ_* identity here on every session/new, so
+# a terminal session can `source` it and use the `buzz` CLI as the agent.
+# This holds the agent's private key — off by default.
+# buzz_env_file = "/var/lib/relay-backport/buzz.env"
 
 [webhook]
 url = "https://hooks.example.com/relay-backport"
 # bearer_file = "/etc/credstore/relay-backport-webhook.token"
 timeout_ms = 8000
 attempts = 3
+# Attach the session's system prompt (verbatim, ~20-40 KB) to every POST.
+include_system_prompt = true
 
 [exec]
 command = ["/usr/local/bin/handle-mention", "--from-relay"]
@@ -39,3 +48,6 @@ timeout_ms = 60000
 # tag) to the hook so it can reply with the `buzz` CLI as the agent. Off by
 # default: the hook then sees only a minimal environment.
 pass_buzz_env = false
+# Attach the session's system prompt (verbatim) to the stdin JSON. Off by
+# default: an exec hook is usually short-lived and does not need it repeated.
+include_system_prompt = false

@@ -17,6 +17,7 @@ function delivery(ev: EventLike): Delivery {
     source: "text",
     session: { id: "s1", cwd: "/tmp", title: "general" },
     prompt: "the whole prompt",
+    systemPrompt: "",
     relay: "wss://relay.example",
     receivedAt: 2,
   };
@@ -75,5 +76,15 @@ describe("delivery payload (webhook + exec)", () => {
     expect("root_id" in buildPayload(d)).toBe(false);
     const raw = [{ id: "x" }];
     expect(buildPayload({ ...d, events: raw }).events).toBe(raw);
+  });
+
+  test("system_prompt rides along only when the sink asks for it and the session had one", () => {
+    const d = delivery(event());
+    expect("system_prompt" in buildPayload(d)).toBe(false);
+    expect("system_prompt" in buildPayload(d, { includeSystemPrompt: true })).toBe(false);
+    const withPrompt = { ...d, systemPrompt: "be terse" };
+    expect("system_prompt" in buildPayload(withPrompt)).toBe(false);
+    expect(buildPayload(withPrompt, { includeSystemPrompt: true }).system_prompt).toBe("be terse");
+    expect(buildPayload(withPrompt, { includeSystemPrompt: false }).system_prompt).toBeUndefined();
   });
 });

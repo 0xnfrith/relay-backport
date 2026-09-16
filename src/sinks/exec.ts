@@ -67,7 +67,7 @@ export class ExecSink implements Sink {
   }
 
   private async runOne(delivery: Delivery): Promise<boolean> {
-    const payload = JSON.stringify(buildPayload(delivery));
+    const payload = JSON.stringify(buildPayload(delivery, { includeSystemPrompt: this.cfg.includeSystemPrompt }));
     const started = Date.now();
     let proc: Bun.Subprocess<"pipe", "inherit", "inherit">;
     try {

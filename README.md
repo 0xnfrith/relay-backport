@@ -70,7 +70,7 @@ bun run src/cli.ts acp --config deploy/relay-backport.example.toml
    MENTION|{"kind":9,"from":"1a2b3c4d","h":"<channel uuid>","content":"…","id":"<event id>","tags":[["h","…"],["p","…"]]}
    ```
 
-   `from` is the first 8 hex chars of the sender (`unknown` when the prompt carried no sender), `content` is capped at 400 characters, `rootId` is added for forum replies (kind 45003). Session lifecycle shows up as `EVENT|session|new|<id>`, `EVENT|session|cancel|<id>`, `EVENT|acp|closed`. `tail` starts at the end of the file (`--lines N` replays the last N first; `--no-follow` prints and exits) and keeps following across truncation, rotation and a file that does not exist yet.
+   `from` is the first 8 hex chars of the sender (`unknown` when the prompt carried no sender), `content` is capped at 400 characters, `rootId` is added for forum replies (kind 45003). Session lifecycle shows up as `EVENT|session|new|<id>` (or `EVENT|session|new|<id>|<path>` when the system prompt was written to disk — `file.system_prompt`, on by default), `EVENT|session|cancel|<id>`, `EVENT|acp|closed`. `tail` starts at the end of the file (`--lines N` replays the last N first; `--no-follow` prints and exits) and keeps following across truncation, rotation and a file that does not exist yet. Read the system prompt file once at the head of the session — see [What the consumer receives](#what-the-consumer-receives).
 
 What Buzz does for you in this mode: it holds the relay socket and the key, discovers channels, applies its respond-to gate, resolves the session scope (channel or thread), fetches thread context and memory, frames the prompt, and shows every prompt in the agent's *Prompt context* panel. relay-backport receives that prompt, whole, and delivers it.
 
@@ -108,7 +108,8 @@ Each prompt is a JSON POST; the receiver must be idempotent on `event_id` (deliv
   "event_source": "meta | text | synthetic",
   "prompt": "<the whole ACP prompt, verbatim>",
   "session": { "id": "<acp session id>", "cwd": "…", "title": "… (when the harness named it)" },
-  "events": [ "… _meta.buzz.events[] as the harness sent it, when it did" ]
+  "events": [ "… _meta.buzz.events[] as the harness sent it, when it did" ],
+  "system_prompt": "<the session's session/new system prompt, verbatim — only when webhook.include_system_prompt is true and the session had one>"
 }
 ```
 
@@ -120,16 +121,28 @@ Retries: network errors, `429` and `5xx` are retried with backoff up to `webhook
 export RELAY_BACKPORT_SINKS=exec RELAY_BACKPORT_EXEC_COMMAND="/usr/local/bin/handle-mention --from-relay"
 ```
 
-The same JSON as the webhook payload is written to the command's stdin; `RELAY_BACKPORT_EVENT_ID`, `_CHANNEL`, `_AUTHOR`, `_KIND`, `_RELAY`, `_SESSION_ID` are set in its environment. The hook gets a **minimal environment** — `PATH`, `HOME`, `USER`, `LANG`/`LC_*`, `TMPDIR`, `TZ` and the Windows basics plus the `RELAY_BACKPORT_*` variables. The harness's own environment stays with relay-backport, including the agent identity Buzz injected (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`) — **unless** `exec.pass_buzz_env = true` (`RELAY_BACKPORT_EXEC_PASS_BUZZ_ENV=true`), which hands every `BUZZ_*` variable (and `NOSTR_PRIVATE_KEY`) to the hook so it can reply as the agent with the `buzz` CLI. Its stdout and stderr go to relay-backport's stderr (stdout is the ACP stream). Exit `0` means accepted. One process at a time, in arrival order, killed after `exec.timeout_ms` (default 60 s). For arguments with spaces use the config file's array form.
+The same JSON as the webhook payload is written to the command's stdin — including `system_prompt` when `exec.include_system_prompt` is on (default off, unlike the webhook sink: an exec hook is usually short-lived and does not need the standing conventions repeated on every invocation) — and `RELAY_BACKPORT_EVENT_ID`, `_CHANNEL`, `_AUTHOR`, `_KIND`, `_RELAY`, `_SESSION_ID` are set in its environment. The hook gets a **minimal environment** — `PATH`, `HOME`, `USER`, `LANG`/`LC_*`, `TMPDIR`, `TZ` and the Windows basics plus the `RELAY_BACKPORT_*` variables. The harness's own environment stays with relay-backport, including the agent identity Buzz injected (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`) — **unless** `exec.pass_buzz_env = true` (`RELAY_BACKPORT_EXEC_PASS_BUZZ_ENV=true`), which hands every `BUZZ_*` variable (and `NOSTR_PRIVATE_KEY`) to the hook so it can reply as the agent with the `buzz` CLI. Its stdout and stderr go to relay-backport's stderr (stdout is the ACP stream). Exit `0` means accepted. One process at a time, in arrival order, killed after `exec.timeout_ms` (default 60 s). For arguments with spaces use the config file's array form.
 
 ## What relay-backport does
 
-1. **Speaks ACP as the agent.** `initialize` (protocol version echoed up to 2, no auth methods, text prompts only), `authenticate`, `session/new` (a session id; the harness's `cwd`, `systemPrompt` / `_meta.systemPrompt.append` and `_meta.sessionTitle` are noted, never logged), `session/prompt`, `session/cancel`. Unknown methods get JSON-RPC `-32601`; an unknown session `-32602`; a bad line `-32700`. stdout carries nothing but the JSON-RPC stream.
+1. **Speaks ACP as the agent.** `initialize` (protocol version echoed up to 2, no auth methods, text prompts only), `authenticate`, `session/new` (a session id; the harness's `cwd` and `_meta.sessionTitle` are noted; `systemPrompt` / `_meta.systemPrompt.append` — whichever the client sends — is kept in full and forwarded to the sinks, never logged beyond its character count), `session/prompt`, `session/cancel`. Unknown methods get JSON-RPC `-32601`; an unknown session `-32602`; a bad line `-32700`. stdout carries nothing but the JSON-RPC stream.
 2. **Resolves the event behind each prompt.** From `_meta.buzz.events[]` when the harness attaches it — **not yet live upstream**: today's `buzz-acp` sends only `{ sessionId, prompt }`, so every prompt currently takes the text path; the structured path is implemented ahead of the shape in flight upstream (the last event routes). The text path reads the harness's framing — the `<buzz-event>` block with its `Event ID:`, `Channel:`, `Kind:`, `From: … (hex: …)`, `Time:`, `Content:`, `Tags:` lines, or the routing event of a `<buzz-events>` batch — from the outermost block span, header fields before `Content:` and tags after it, so a message body containing a forged `</buzz-event><buzz-event>…` sequence or a forged batch separator stays inside `content` and cannot replace the id, sender, channel or tags (a batch whose separators do not match its `count` routes on its first event). Otherwise a synthetic event: a stable sha256 id, sender unknown, the raw prompt as content. The prompt itself always travels whole.
 3. **Delivers** to every configured sink at once and waits up to `delivery_wait_ms` (default 15 s); then streams one `session/update` `agent_message_chunk` — "delivered to N sinks", or honestly "N of M (K failed)" / "still in flight" — and ends the turn with `stopReason: end_turn`. A `session/cancel` during the wait ends it with `cancelled`. It never blocks on a human and never publishes on the relay.
 4. **Records the session lifecycle** in the file sink so a follower can see sessions come and go, and exits 0 when the harness closes its stdin.
 
 What the harness guarantees, and what it does not. The harness gates **who may trigger** a turn (its "who can send instructions" rule), deduplicates, and resolves session scope and thread context — none of that is repeated here. But until `_meta.buzz.events[]` ships, the `author`, `channel`, `event_id`, `text` and `tags` in a delivery are **parsed from prompt text**, not signed data: they are trustworthy as routing hints from a harness you run, not as an authenticity guarantee about the message. A hook that replies through the `buzz` CLI should anchor to the thread it was mentioned in — reply to the event it was woken for — rather than trust a `Channel:` field blindly, and should treat `text` as untrusted input like any other chat message. Not needed here: a relay URL, a key, a state file beyond the delivery log.
+
+## What the consumer receives
+
+A Buzz harness sends its standing context **once per session** (on `session/new`) and the per-turn delta on every `session/prompt` — it does not repeat the standing block on every turn, because doing so would make 150 lines of conventions the newest, most-repeated text in the window, crowding out the conversation they exist to frame. relay-backport hands both to every sink, unmodified:
+
+- **Once per session, at `session/new`** — the system prompt: the whole Buzz conventions block (CLI reference, mention/threading etiquette, memory protocol, the agent's own persona and team instructions, whatever the harness assembled). The `file` sink writes it to `<state_dir>/sessions/<session id>.system-prompt.md` and names that path in the `EVENT|session|new|<id>|<path>` lifecycle line; the `webhook` sink attaches it as `system_prompt` on every subsequent POST (there is no separate "session started" webhook call); the `exec` sink includes it on stdin only when asked.
+- **On every turn, at `session/prompt`** — the event line (`MENTION|{json}` for the file sink) and the full per-turn payload (`prompt`, `session`, `text`, `tags`, …) for webhook/exec, exactly as before.
+- **The credentials, on request** — `file.buzz_env_file` writes the harness-injected `BUZZ_RELAY_URL` / `BUZZ_PRIVATE_KEY` / `BUZZ_AUTH_TAG` to a path a terminal session can `source`, so it can call the `buzz` CLI as the agent. The `exec` sink already had an equivalent (`exec.pass_buzz_env`); the `file` + `tail` path did not, until now.
+
+**The Buzz Desktop DM caveat.** In a direct message, Buzz Desktop p-tags every DM participant on every outgoing message — deliberately, so agent harnesses fire even without an explicit `@mention` — which means **every message the owner sends in a DM triggers a `session/prompt`**, not just ones that name the agent. A channel still requires an explicit mention. This is harness behavior, not relay-backport's; it shows up here because it changes how often a consumer sees a turn in a DM versus a channel.
+
+**Why forward verbatim, not reshaped.** The instruction *text* Buzz sends (its base prompt, the per-turn framing) moved dozens of times in the 60 days before this release; the *shape* relay-backport reads it through moved far less. Any local rewrite, summary, or template of that text goes stale the next time upstream edits its wording — and there is no way for relay-backport to know when that happens. Passing it through unmodified is the only version that cannot drift out of sync with what Buzz actually sent.
 
 ## Configuration
 
@@ -142,13 +155,17 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `delivery_wait_ms` | `RELAY_BACKPORT_DELIVERY_WAIT_MS` | `15000` | How long a turn waits for the sinks before ending anyway |
 | `log_format` | `RELAY_BACKPORT_LOG_FORMAT` | `text` | `text` or `json`, on stderr |
 | `file.path` | `RELAY_BACKPORT_FILE` | `<state_dir>/deliveries.jsonl` | The file the `file` sink appends to and `tail` follows |
+| `file.system_prompt` | `RELAY_BACKPORT_FILE_SYSTEM_PROMPT` | `true` | Write the session's system prompt to `<state_dir>/sessions/<id>.system-prompt.md` once, and name it in the `EVENT|session|new|…` line |
+| `file.buzz_env_file` | `RELAY_BACKPORT_FILE_BUZZ_ENV_FILE` | — (off) | Path to (re)write the present `BUZZ_RELAY_URL` / `BUZZ_PRIVATE_KEY` / `BUZZ_AUTH_TAG` to, on every `session/new` — holds the agent's private key; see [Security notes](#security-notes) |
 | `webhook.url` | `RELAY_BACKPORT_WEBHOOK_URL` | — | Required for the webhook sink |
 | `webhook.bearer_file` | `RELAY_BACKPORT_WEBHOOK_BEARER_FILE` | — | File holding a bearer token sent as `Authorization: Bearer …`; never logged |
 | `webhook.timeout_ms` | `RELAY_BACKPORT_WEBHOOK_TIMEOUT_MS` | `8000` | Per-attempt timeout |
 | `webhook.attempts` | `RELAY_BACKPORT_WEBHOOK_ATTEMPTS` | `3` | Attempts before giving up |
+| `webhook.include_system_prompt` | `RELAY_BACKPORT_WEBHOOK_INCLUDE_SYSTEM_PROMPT` | `true` | Attach the session's system prompt (verbatim, ~20-40 KB) to every POST |
 | `exec.command` | `RELAY_BACKPORT_EXEC_COMMAND` | — | Array in the file; whitespace-split in env |
 | `exec.timeout_ms` | `RELAY_BACKPORT_EXEC_TIMEOUT_MS` | `60000` | Kill the hook after this long |
 | `exec.pass_buzz_env` | `RELAY_BACKPORT_EXEC_PASS_BUZZ_ENV` | `false` | Hand the harness-injected `BUZZ_*` identity to the hook |
+| `exec.include_system_prompt` | `RELAY_BACKPORT_EXEC_INCLUDE_SYSTEM_PROMPT` | `false` | Attach the session's system prompt (verbatim) to the stdin JSON |
 
 Buzz's own variables (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, …) are not configuration for relay-backport: `BUZZ_RELAY_URL` is copied into payloads as `relay`, the key and any API token are registered with the log redactor at startup, and none of them is read otherwise.
 
@@ -156,9 +173,9 @@ CLI: `relay-backport [acp] [--config PATH] [--sink NAME]… [--file PATH] [--sta
 
 ## Sinks
 
-- **`file`** — one `MENTION|{json}` line per delivery plus `EVENT|…` lifecycle lines, each a single append to a 0600 file whose directory is created on demand; `relay-backport tail` is its reader. The v0.1 stdout contract, moved to a file because stdout now belongs to ACP.
-- **`webhook`** — JSON POST with retry/backoff; optional bearer from a file.
-- **`exec`** — one process per delivery, JSON on stdin, concurrency 1, timeout, minimal environment (opt-in `BUZZ_*` passthrough).
+- **`file`** — one `MENTION|{json}` line per delivery plus `EVENT|…` lifecycle lines, each a single append to a 0600 file whose directory is created on demand; `relay-backport tail` is its reader. The v0.1 stdout contract, moved to a file because stdout now belongs to ACP. On `session/new` it also (optionally) writes the system prompt to a sibling file and, when configured, the harness's `BUZZ_*` identity to a `.env`-shaped file — both 0600, both atomic writes.
+- **`webhook`** — JSON POST with retry/backoff; optional bearer from a file; the session's system prompt rides along by default.
+- **`exec`** — one process per delivery, JSON on stdin, concurrency 1, timeout, minimal environment (opt-in `BUZZ_*` passthrough, opt-in system prompt).
 
 ## Architecture
 
@@ -210,6 +227,8 @@ v0.2 therefore keeps only what `buzz-acp` does not do — delivery to tools that
 ## Security notes
 
 - Buzz's injected key and any API token are registered with the log redactor at startup and never read; the exec hook does not see them unless `exec.pass_buzz_env` says so. A webhook bearer is masked the same way.
+- **`file.buzz_env_file` writes the agent's own private key to disk in plaintext** (`BUZZ_PRIVATE_KEY`, alongside `BUZZ_RELAY_URL` and `BUZZ_AUTH_TAG`). It exists so a terminal session with no other way to reach the harness's environment can `source` it and act as the agent through the `buzz` CLI — treat that file exactly like a private key file (mode 0600 where the platform honours file modes — not on Windows; keep its directory out of backups and screen shares). Off by default; turn it on only for a consumer that needs to *act* as the agent, not merely read its mentions.
+- The system prompt, wherever it lands (the sibling file, a webhook body, an exec hook's stdin), is Buzz's own conventions text — not a secret, but treat a file holding it like the delivery log: it can contain the agent's persona and team instructions.
 - relay-backport opens no network socket of its own and never publishes on the relay. Its only outputs are the sinks and the JSON-RPC stream on stdout.
 - The delivery file is 0600 in a 0700 directory. It holds message content; treat it like a log.
 - Delivery is at-least-once (the harness may re-prompt after a cancel or a restart). Receivers must be idempotent on `event_id`.
