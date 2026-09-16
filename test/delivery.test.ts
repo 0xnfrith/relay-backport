@@ -29,13 +29,26 @@ describe("MENTION| line (the v0.1 contract)", () => {
     expect(formatMentionLine(ev)).toBe(`MENTION|${JSON.stringify({ kind: 9, from: SENDER.slice(0, 8), h: CHANNEL, content: "hi", id: ev.id, tags: ev.tags })}`);
   });
 
-  test("content is capped at 400 characters; an unknown sender prints as \"unknown\"; forum replies carry rootId", () => {
+  test("content is uncapped by default; an unknown sender prints as \"unknown\"; forum replies carry rootId", () => {
     const long = buildMentionLine(event({ content: "x".repeat(1000) }));
-    expect(long.content.length).toBe(400);
+    expect(long.content.length).toBe(1000);
+    expect(long.truncated).toBeUndefined();
     expect(buildMentionLine(event({ pubkey: "" })).from).toBe("unknown");
     const reply = buildMentionLine(event({ kind: 45003, tags: [["h", CHANNEL], ["e", ROOT]] }));
     expect(reply.rootId).toBe(ROOT);
     expect(buildMentionLine(event({ kind: 9, tags: [["h", CHANNEL], ["e", ROOT]] })).rootId).toBeUndefined();
+  });
+
+  test("a cap that bites truncates and flags; one that does not leaves the line byte-identical", () => {
+    const ev = event({ content: "x".repeat(1000) });
+    const capped = buildMentionLine(ev, 100);
+    expect(capped.content).toBe("x".repeat(100));
+    expect(capped.truncated).toBe(true);
+    expect(formatMentionLine(ev, 100)).toEndWith(`"truncated":true}`);
+    // A cap wider than the content, and a cap of exactly its length, do not flag.
+    expect(buildMentionLine(ev, 1000).truncated).toBeUndefined();
+    expect(buildMentionLine(ev, 5000).content.length).toBe(1000);
+    expect(formatMentionLine(event(), 400)).toBe(formatMentionLine(event()));
   });
 
   test("thread root: root marker, else reply marker, else first e tag, else self", () => {

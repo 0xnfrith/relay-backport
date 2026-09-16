@@ -55,7 +55,7 @@ describe("config loading", () => {
     expect(cfg.stateDir).toBe("/var/lib/rb");
     expect(cfg.sinks).toEqual(["file", "webhook", "exec"]);
     expect(cfg.deliveryWaitMs).toBe(2500);
-    expect(cfg.file).toEqual({ path: "/var/log/rb/deliveries.jsonl", systemPrompt: true, buzzEnvFile: undefined });
+    expect(cfg.file).toEqual({ path: "/var/log/rb/deliveries.jsonl", systemPrompt: true, buzzEnvFile: undefined, contentMaxChars: 0 });
     expect(cfg.webhook).toEqual({ url: "https://hooks.example.com/x", bearerFile: undefined, timeoutMs: 1234, attempts: 3, includeSystemPrompt: true, threadContext: "delta", cumulativeMaxChars: 32_000 });
     expect(cfg.exec).toEqual({ command: ["/usr/local/bin/handle", "--from-relay"], timeoutMs: 60_000, passBuzzEnv: true, includeSystemPrompt: false });
     expect(cfg.configPath).toBe("/etc/rb.toml");
@@ -150,6 +150,21 @@ describe("config loading", () => {
     });
   });
 
+  test("file.content_max_chars: 0 (unlimited) by default, set by env or TOML, rejected when negative or not an integer", () => {
+    const base = { HOME: "/home/u" };
+    expect(loadConfig({ env: base, readFile }).file).toMatchObject({ contentMaxChars: 0 });
+    expect(loadConfig({ env: { ...base, RELAY_BACKPORT_FILE_CONTENT_MAX_CHARS: "400" }, readFile }).file).toMatchObject({ contentMaxChars: 400 });
+    const fromToml = loadConfig({
+      configPath: "/etc/cap.toml",
+      env: {},
+      readFile: (p) => (p === "/etc/cap.toml" ? '[file]\ncontent_max_chars = 1200\n' : readFile(p)),
+    });
+    expect(fromToml.file).toMatchObject({ contentMaxChars: 1200 });
+    expect(describeConfig(fromToml)).toMatchObject({ file: { content_max_chars: 1200 } });
+    expect(() => loadConfig({ env: { ...base, RELAY_BACKPORT_FILE_CONTENT_MAX_CHARS: "-1" }, readFile })).toThrow(/file.content_max_chars/);
+    expect(() => loadConfig({ env: { ...base, RELAY_BACKPORT_FILE_CONTENT_MAX_CHARS: "lots" }, readFile })).toThrow(/file.content_max_chars/);
+  });
+
   test("TOML file: file.system_prompt / file.buzz_env_file / webhook.include_system_prompt / exec.include_system_prompt", () => {
     const cfg = loadConfig({
       configPath: "/etc/system-prompt.toml",
@@ -173,7 +188,7 @@ include_system_prompt = true
 `
           : readFile(p),
     });
-    expect(cfg.file).toEqual({ path: cfg.file!.path, systemPrompt: false, buzzEnvFile: "/s/buzz.env" });
+    expect(cfg.file).toEqual({ path: cfg.file!.path, systemPrompt: false, buzzEnvFile: "/s/buzz.env", contentMaxChars: 0 });
     expect(cfg.webhook?.includeSystemPrompt).toBe(false);
     expect(cfg.exec?.includeSystemPrompt).toBe(true);
   });

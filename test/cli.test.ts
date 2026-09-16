@@ -27,6 +27,10 @@ describe("argument parsing", () => {
     expect(a.flags).toEqual({ file: "/x", lines: "5", "no-follow": true, sink: ["file", "webhook"] });
     const o = overridesFromFlags({ ...a.flags, "state-dir": "/s", "log-format": "json" });
     expect(o).toEqual({ file: { path: "/x" }, sinks: ["file", "webhook"], state_dir: "/s", log_format: "json" });
+    // --file and --file-content-max-chars together: neither drops the other
+    const both = parseArgs(["acp", "--file", "/x", "--file-content-max-chars", "400"]);
+    expect(overridesFromFlags(both.flags)).toEqual({ file: { path: "/x", content_max_chars: "400" } });
+    expect(overridesFromFlags(parseArgs(["acp", "--file-content-max-chars=250"]).flags)).toEqual({ file: { content_max_chars: "250" } });
     expect(parseArgs([]).command).toBeUndefined();
     expect(parseArgs(["-h"]).flags.help).toBe(true);
     expect(parseArgs(["-v"]).flags.version).toBe(true);

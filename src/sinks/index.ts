@@ -45,6 +45,7 @@ export function buildSinks(cfg: Config, opts: SinkFactoryOptions = {}): Sink[] {
             stateDir: cfg.stateDir,
             systemPrompt: cfg.file.systemPrompt,
             buzzEnvFile: cfg.file.buzzEnvFile,
+            contentMaxChars: cfg.file.contentMaxChars,
             env: opts.env,
           }),
         );

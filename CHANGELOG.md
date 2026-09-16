@@ -2,6 +2,17 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.3.2 — 2026-09-17
+
+**The `MENTION|` line was silently eating the end of long messages.** `content` had been capped at a fixed 400 characters since v0.1, when that line was a human-readable preview printed to stdout. It is now the delivery channel into a terminal session: a message longer than the cap arrived with its tail cut off, with nothing on the line to say so, so a consumer could not tell a short message from a clipped one. A dictated instruction whose last sentence fell past character 400 was simply never seen.
+
+### Changed
+
+- **`content` is delivered whole by default.** The cap is now `file.content_max_chars` (env `RELAY_BACKPORT_FILE_CONTENT_MAX_CHARS`, CLI `--file-content-max-chars N`), default `0` = unlimited. Set it to a positive integer to cap as before — `400` reproduces 0.3.1's behaviour exactly.
+- **A cap that actually truncates adds `"truncated": true`** to the JSON on the line, after `rootId`. When nothing is truncated the field is absent and the line is byte-identical to every version since v0.1 — same fields, same order — so an existing consumer keeps parsing it unchanged.
+- **`MENTION_CONTENT_MAX` is gone** from the library surface; the value is a config key now, not a constant.
+- Nothing else moves: the `EVENT|` lifecycle lines, `tail` (whose reader never assumed a maximum line length), the webhook and exec sinks, and every other config key are untouched.
+
 ## 0.3.1 — 2026-09-17
 
 **Cumulative thread context was still missing half the thread.** 0.3.0 accumulated the `<thread-context>` blocks the harness sends and nothing else — but the harness withholds an already-delivered *mention* exactly as it withholds already-delivered context. Turn 2 of a thread therefore arrived at a stateless receiver with the prose note, the new mention, and no copy of turn 1's own text anywhere in the payload. Found on a live receiver: mention A "remember the word HARBOR", mention B "what word?" in the same thread — B's `thread_context_cumulative` had no HARBOR in it, and the receiver answered with a word nobody had said.

@@ -34,6 +34,9 @@ OPTIONS (all commands)
   --config PATH        config file (TOML or JSON); or RELAY_BACKPORT_CONFIG
   --state-dir PATH     where the default delivery file lives; or RELAY_BACKPORT_STATE_DIR
   --file PATH          the delivery file; or RELAY_BACKPORT_FILE (default STATE_DIR/deliveries.jsonl)
+  --file-content-max-chars N
+                       cap the MENTION line's content; or RELAY_BACKPORT_FILE_CONTENT_MAX_CHARS
+                       (default 0 = unlimited; a cap that bites adds "truncated": true)
   --log-format FMT     text | json (stderr; stdout is the ACP stream / the tail output)
   --verbose            debug logging
 
@@ -71,7 +74,7 @@ export type ParsedArgs = {
   flags: Record<string, string | boolean | string[]>;
 };
 
-const VALUE_FLAGS = new Set(["config", "state-dir", "file", "sink", "log-format", "lines", "cursor", "port", "buffer", "bind"]);
+const VALUE_FLAGS = new Set(["config", "state-dir", "file", "file-content-max-chars", "sink", "log-format", "lines", "cursor", "port", "buffer", "bind"]);
 const BOOL_FLAGS = new Set(["help", "version", "verbose", "no-follow", "no-cursor", "dry-run", "observe"]);
 const REPEATABLE = new Set(["sink"]);
 
@@ -140,7 +143,12 @@ export function overridesFromFlags(flags: ParsedArgs["flags"]): RawConfig {
   const stateDir = str(flags["state-dir"]);
   if (stateDir !== undefined) o.state_dir = stateDir;
   const file = str(flags.file);
-  if (file !== undefined) o.file = { path: file };
+  const fileContentMax = str(flags["file-content-max-chars"]);
+  if (file !== undefined || fileContentMax !== undefined) {
+    o.file = {};
+    if (file !== undefined) o.file.path = file;
+    if (fileContentMax !== undefined) o.file.content_max_chars = fileContentMax;
+  }
   if (Array.isArray(flags.sink)) o.sinks = flags.sink;
   const logFormat = str(flags["log-format"]);
   if (logFormat !== undefined) o.log_format = logFormat;
