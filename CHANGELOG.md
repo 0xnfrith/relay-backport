@@ -2,7 +2,7 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## 0.3.0 — YYYY-MM-DD
+## 0.3.0 — 2026-09-17
 
 **Two shapes, both of them now supported end to end: a terminal session that tails a file, and a webhook that keeps no state.** 0.2.x shipped the pieces; 0.3 closes the gaps that stopped either shape working unattended. The terminal shape lost mentions on every restart — the tail now carries a cursor. Running the harness headlessly meant an operator-maintained shell script per machine — `run` absorbs it. And a webhook received a thread's history exactly once, then deltas forever — `cumulative` mode keeps the ledger a stateless receiver cannot.
 
