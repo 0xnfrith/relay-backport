@@ -132,6 +132,8 @@ export async function tailFile(opts: TailOptions): Promise<void> {
   let ino = -1;
   let partial = "";
   let lineNo = 0;
+  /** The file vanished under us; re-place ourselves against the cursor when it returns. */
+  let resyncNeeded = false;
 
   const emit = (line: string) => {
     opts.write(line);
@@ -141,17 +143,6 @@ export async function tailFile(opts: TailOptions): Promise<void> {
       // would replay the filtered ones forever.
       lineNo++;
       writeCursor(cursorPath, lineNo);
-    }
-  };
-
-  const rewind = () => {
-    offset = 0;
-    partial = "";
-    if (cursorPath && lineNo !== 0) {
-      lineNo = 0;
-      writeCursor(cursorPath, 0);
-    } else if (cursorPath) {
-      lineNo = 0;
     }
   };
 
@@ -167,22 +158,40 @@ export async function tailFile(opts: TailOptions): Promise<void> {
     }
   };
 
+  /**
+   * Place the tail against the persisted cursor and replay whatever the file
+   * has beyond it. Used at start AND whenever the file has been away: `stat`
+   * fails for a transient EACCES or a filesystem hiccup as readily as for a
+   * delete, so a file that vanishes and comes back unchanged must NOT replay —
+   * only a file that is genuinely shorter than the cursor claims does.
+   */
+  const resyncFromCursor = (size: number) => {
+    let start = readCursor(cursorPath!);
+    const ends = lineEnds(readRangeBuf(opts.path, 0, size));
+    if (ends.length < start) start = 0; // rotated or truncated while we were away
+    lineNo = start;
+    offset = start === 0 ? 0 : ends[start - 1]!;
+    partial = "";
+    if (ends.length > start) {
+      opts.write(catchupLine(ends.length - start));
+      drain(size);
+    }
+  };
+
+  /** A confirmed rotation or truncation of a file we are watching: it starts over, and so does the cursor. */
+  const rewind = () => {
+    offset = 0;
+    partial = "";
+    lineNo = 0;
+    if (cursorPath) writeCursor(cursorPath, 0);
+  };
+
   const initial = stat(opts.path);
   if (initial) ino = initial.ino;
 
   if (cursorPath) {
-    let start = initial ? readCursor(cursorPath) : 0;
-    if (initial) {
-      const ends = lineEnds(readRangeBuf(opts.path, 0, initial.size));
-      // Fewer lines than the cursor claims: rotated or truncated under us.
-      if (ends.length < start) start = 0;
-      lineNo = start;
-      offset = start === 0 ? 0 : ends[start - 1]!;
-      if (ends.length > start) {
-        opts.write(catchupLine(ends.length - start));
-        drain(initial.size);
-      }
-    }
+    if (initial) resyncFromCursor(initial.size);
+    else resyncNeeded = true;
   } else if (initial) {
     offset = initial.size;
     const wanted = opts.lines ?? 0;
@@ -193,12 +202,21 @@ export async function tailFile(opts: TailOptions): Promise<void> {
   while (!opts.signal?.aborted) {
     const s = stat(opts.path);
     if (!s) {
-      // deleted or not yet created: start from the top when it appears
-      rewind();
+      // missing, not yet created, or briefly unreadable: forget where we were.
+      // The cursor on disk is deliberately left alone.
+      offset = 0;
+      partial = "";
+      lineNo = 0;
       ino = -1;
+      resyncNeeded = true;
+    } else if (resyncNeeded) {
+      ino = s.ino;
+      resyncNeeded = false;
+      if (cursorPath) resyncFromCursor(s.size);
+      else drain(s.size);
     } else {
       if (s.ino !== ino || s.size < offset) {
-        // rotated (new inode) or truncated: the file starts over
+        // rotated (new inode) or truncated under a live tail: the file starts over
         rewind();
         ino = s.ino;
       }

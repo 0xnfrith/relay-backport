@@ -104,7 +104,7 @@ MENTION|{…}
 MENTION|{…}
 ```
 
-A cold start with no cursor replays the whole file. A file with fewer lines than the cursor claims has rotated, and replays from the top; so does a truncation or a new inode while following. `--no-cursor` restores the pre-0.3 behaviour — follow from the end, keep nothing — and is the only mode in which `--lines N` applies. `--no-follow` prints what is pending and exits.
+A cold start with no cursor replays the whole file. A file with fewer lines than the cursor claims has rotated, and replays from the top; so does a truncation or a new inode while following. A file that merely goes *missing* for a moment does not — `stat` fails for a transient error as readily as for a delete, so the cursor survives and the tail places itself against it again when the file returns. `--no-cursor` restores the pre-0.3 behaviour — follow from the end, keep nothing — and is the only mode in which `--lines N` applies. `--no-follow` prints what is pending and exits.
 
 ### 4. Watch the context, optionally
 
