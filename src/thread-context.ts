@@ -13,6 +13,16 @@
 // `thread_context_cumulative`. The per-turn `prompt` is untouched — it is what
 // the observe page renders verbatim and counts tokens from — and the extra
 // field is simply absent in the default `delta` mode.
+//
+// Blocks alone are not enough, which is what 0.3.0 shipped. The harness never
+// re-sends a mention it has already delivered — turn 2's prompt carries the
+// bare delta and the prose note — so the ledger must also record, per turn,
+// the mention that WAS delivered. Otherwise turn 2 of a thread cannot see the
+// text of turn 1: ask a stateless receiver to remember a word in mention A and
+// it has nothing but a hallucination to answer mention B with. Each delivered
+// event is therefore appended after its own turn's payload is built (never on
+// the turn that carries it — that text is already in `prompt`), interleaved
+// with the blocks in delivery order, under the same bound.
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { outerBlock } from "./prompt";
@@ -28,12 +38,43 @@ export const DEFAULT_CUMULATIVE_MAX_CHARS = 32_000;
  */
 export const CONTEXT_TAGS = ["thread-context", "conversation-context"] as const;
 
+/**
+ * What a ledger line records. `block` is a `<thread-context>` block a prompt
+ * carried; `event` is a mention that was itself delivered on an earlier turn.
+ * Lines written before 0.3.1 carry no `kind` and read as `block`.
+ */
+export type LedgerKind = "block" | "event";
+
 export type LedgerEntry = {
-  /** The event whose prompt carried this block — the dedup key across retries. */
+  /** The event whose prompt carried this block, or the delivered event itself. */
   event_id: string;
   at: number;
   text: string;
+  /** Absent on pre-0.3.1 lines, which are blocks. */
+  kind?: LedgerKind;
 };
+
+export function kindOf(e: LedgerEntry): LedgerKind {
+  return e.kind === "event" ? "event" : "block";
+}
+
+/**
+ * How a previously delivered mention is rendered into the accumulation. It is
+ * labelled, because a later `<thread-context>` block usually repeats the same
+ * message: the receiver has to be able to tell "a mention I was already sent"
+ * from "thread history the harness built", or it reads the pair as two
+ * distinct messages. Time comes from the event's own `created_at`.
+ */
+export function formatDeliveredEvent(ev: {
+  id: string;
+  pubkey: string;
+  content: string;
+  created_at: number;
+}): string {
+  const at = Number.isFinite(ev.created_at) ? new Date(ev.created_at * 1000).toISOString() : "unknown time";
+  const from = ev.pubkey || "unknown";
+  return `[previously delivered mention] from ${from} · ${at} · event ${ev.id}\n${ev.content ?? ""}`;
+}
 
 /**
  * The context block a prompt carries, or undefined. Parsed with the same
@@ -120,10 +161,16 @@ export class ThreadContextLedger {
     return loaded;
   }
 
-  /** Record a block once per event. Returns false when it was already there. */
+  /**
+   * Record an entry once per (kind, event id). Returns false when it was
+   * already there. The kind is part of the key because one turn contributes
+   * up to two lines under the SAME event id — the block its prompt carried,
+   * and later the mention itself — while a retry of that turn must add
+   * neither.
+   */
   append(sessionId: string, entry: LedgerEntry): boolean {
     const entries = this.entries(sessionId);
-    if (entries.some((e) => e.event_id === entry.event_id)) return false;
+    if (entries.some((e) => e.event_id === entry.event_id && kindOf(e) === kindOf(entry))) return false;
     entries.push(entry);
     const write =
       this.io.append ??
@@ -140,8 +187,17 @@ export class ThreadContextLedger {
     return true;
   }
 
-  /** Everything recorded for a session, bounded. */
-  accumulated(sessionId: string): Accumulated {
-    return accumulate(this.entries(sessionId), this.maxChars);
+  /**
+   * Everything recorded for a session, bounded. `excludeEvent` drops the
+   * delivered-mention line for one event id: the current turn's own text is
+   * already in `prompt`, and delivery is at-least-once, so a redelivery must
+   * not fold it in either. Structural, rather than relying on append order.
+   */
+  accumulated(sessionId: string, opts: { excludeEvent?: string } = {}): Accumulated {
+    const all = this.entries(sessionId);
+    const entries = opts.excludeEvent
+      ? all.filter((e) => !(kindOf(e) === "event" && e.event_id === opts.excludeEvent))
+      : all;
+    return accumulate(entries, this.maxChars);
   }
 }

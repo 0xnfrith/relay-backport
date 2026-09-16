@@ -2,6 +2,22 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.3.1 — 2026-09-17
+
+**Cumulative thread context was still missing half the thread.** 0.3.0 accumulated the `<thread-context>` blocks the harness sends and nothing else — but the harness withholds an already-delivered *mention* exactly as it withholds already-delivered context. Turn 2 of a thread therefore arrived at a stateless receiver with the prose note, the new mention, and no copy of turn 1's own text anywhere in the payload. Found on a live receiver: mention A "remember the word HARBOR", mention B "what word?" in the same thread — B's `thread_context_cumulative` had no HARBOR in it, and the receiver answered with a word nobody had said.
+
+### Fixed
+
+- **`cumulative` mode now also records the mentions it delivered.** For every delivery the per-session ledger keeps, in delivery order, both the `<thread-context>` block the prompt carried (as before) and the event that was delivered — author, `created_at`, event id and the message text as the prompt's `<buzz-event>` carried it. `thread_context_cumulative` for turn N is therefore every context block seen so far *plus* the mentions of turns 1..N-1, interleaved by delivery order, under the same `webhook.cumulative_max_chars` bound (oldest entries dropped whole from the front, `thread_context_truncated: true` when they are).
+- **The current turn's own mention is never in the field.** It is already in `prompt` and `text`; repeating it would cost tokens to say the same thing twice. Delivery is at-least-once, so the exclusion is by event id rather than by ordering — a redelivered turn still excludes itself.
+- **The receiver's own replies are not in it either.** relay-backport never sees them; they appear only if the harness folds them into a later `<thread-context>` block, which is the harness's call to make.
+- **A delivered mention is labelled** — `[previously delivered mention] from <pubkey> · <ISO time> · event <id>`, then the text. A later thread-context block usually repeats the same message, and that duplication is the safe failure mode only if a model reading the field can tell "a mention I was already sent" from "history the harness built".
+
+### Changed
+
+- **Ledger lines carry `kind: "block" | "event"`.** Reads are backward compatible: a line written by 0.3.0 has no `kind` and loads as a block, so an existing `<state_dir>/sessions/<sid>.context.jsonl` keeps working across the upgrade without migration. De-duplication is now on `(kind, event_id)` rather than `event_id` alone — one turn contributes up to two lines under the same event id, while a retry of that turn still contributes neither.
+- Nothing outside `cumulative` mode moves. `delta` is still the default and still byte-identical to 0.2.x, `prompt` is still exactly what the harness built, the `file` and `exec` sinks are untouched, and no config key, CLI flag or `MENTION|` line changes.
+
 ## 0.3.0 — 2026-09-17
 
 **Two shapes, both of them now supported end to end: a terminal session that tails a file, and a webhook that keeps no state.** 0.2.x shipped the pieces; 0.3 closes the gaps that stopped either shape working unattended. The terminal shape lost mentions on every restart — the tail now carries a cursor. Running the harness headlessly meant an operator-maintained shell script per machine — `run` absorbs it. And a webhook received a thread's history exactly once, then deltas forever — `cumulative` mode keeps the ledger a stateless receiver cannot.

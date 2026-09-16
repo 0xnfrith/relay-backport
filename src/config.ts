@@ -54,10 +54,11 @@ export type WebhookConfig = {
   /**
    * `delta` (default, and 0.2.x behaviour): POST the prompt as the harness
    * built it. `cumulative`: also carry every `<thread-context>` block the
-   * session has seen, for a receiver that keeps no state.
+   * session has seen and every mention already delivered in it, for a
+   * receiver that keeps no state.
    */
   threadContext: "delta" | "cumulative";
-  /** Bound on `thread_context_cumulative`; oldest blocks are dropped first. */
+  /** Bound on `thread_context_cumulative`; oldest entries are dropped first. */
   cumulativeMaxChars: number;
 };
 

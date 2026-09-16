@@ -18,7 +18,7 @@ Single static binary (Bun), no runtime dependencies, identical behaviour on Linu
 | **Headless `buzz-acp`** (a server, a container, the k8s agent image) | `BUZZ_ACP_AGENT_COMMAND=relay-backport BUZZ_ACP_AGENT_ARGS=acp buzz-acp` | **ready** — same ACP flow |
 | **Claude Code — interactive session** | `file` sink + `relay-backport tail` under the session's Monitor tool | **ready** — the `MENTION\|` line is the v0.1 shape, unchanged; the tail's cursor replays anything written while it was down |
 | **Claude Code — headless (`claude -p`)**, any script or shell hook | `exec` sink, one process per prompt, JSON on stdin | **ready** — the sink is tested; a specific `claude -p` invocation is not |
-| **Webhook-driven bots** (cloud agents, Automations, any HTTP trigger) | `webhook` sink, JSON POST with retry | **ready** — `webhook.thread_context = "cumulative"` carries the thread history a stateless receiver cannot keep |
+| **Webhook-driven bots** (cloud agents, Automations, any HTTP trigger) | `webhook` sink, JSON POST with retry | **ready** — `webhook.thread_context = "cumulative"` carries the thread history *and the mentions already delivered*, which a stateless receiver cannot keep |
 | **OpenAI Codex CLI — interactive TUI** | — | **uncertain — not yet investigated** |
 | **xAI Grok Build — interactive TUI** | — | **uncertain — not yet investigated** |
 | **OpenCode — interactive TUI** | — | **uncertain — not yet investigated** |
@@ -138,7 +138,7 @@ Each prompt is a JSON POST. Delivery is at-least-once, so **the receiver must be
   "session": { "id": "<acp session id>", "cwd": "…", "title": "… (when the harness named it)" },
   "events": [ "… _meta.buzz.events[] as the harness sent it, when it did" ],
   "system_prompt": "<the session's system prompt, verbatim — only when webhook.include_system_prompt is true>",
-  "thread_context_cumulative": "<every thread-context block this session has carried, oldest first — cumulative mode only>",
+  "thread_context_cumulative": "<every thread-context block this session has carried, plus every mention already delivered in it, oldest first — cumulative mode only>",
   "thread_context_truncated": true
 }
 ```
@@ -164,11 +164,13 @@ Retries: network errors, `429` and `5xx` are retried with backoff up to `webhook
 
 `buzz-acp` builds a thread's history **once per session**. The first prompt of a thread carries it in a `<thread-context>` block; every later prompt in that session is told, in prose, that "Earlier thread context was already delivered in this session". That is right for a long-lived agent process holding a conversation, and exactly wrong for a webhook: your handler gets the history on the first request and a bare delta on every one after it, with no way to ask for the rest.
 
-relay-backport can keep the ledger your receiver does not have. Set `webhook.thread_context = "cumulative"` (`RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT`) and every POST carries **`thread_context_cumulative`**: every context block the ACP session has seen, oldest first, including this turn's. It is bounded by `webhook.cumulative_max_chars` (default 32000); over the bound, whole blocks are dropped from the oldest end and the payload carries `"thread_context_truncated": true`.
+There is a second half to the same hole, and it is the one that bites first. The harness never re-sends a mention it has already delivered either — so a thread-context block is not the whole history, it is only the history *as of the turn that carried it*. Ask a stateless receiver to remember a word in mention A and then ask about it in mention B, and turn 2 has the note, the delta, and nothing that ever contained A's text. It will answer, confidently, with a word nobody said.
+
+relay-backport can keep the ledger your receiver does not have. Set `webhook.thread_context = "cumulative"` (`RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT`) and every POST carries **`thread_context_cumulative`**: every context block the ACP session has seen, **plus every mention already delivered in it**, in delivery order, oldest first. The current turn's own mention is not repeated there — it is already in `prompt` and `text`. A delivered mention is rendered with a `[previously delivered mention] from <pubkey> · <time> · event <id>` header, so a receiver can tell it apart from harness-built history when a later block repeats the same message. It is bounded by `webhook.cumulative_max_chars` (default 32000); over the bound, whole entries are dropped from the oldest end and the payload carries `"thread_context_truncated": true`.
 
 It is a **new field, not a rewritten prompt**. `prompt` stays exactly what the harness built — it is what the observe page renders verbatim and derives its per-session token estimate from, and prepending history there would silently double-count it. A receiver that wants the old behaviour changes nothing: `delta` is the default, and in `delta` mode the payload is byte-identical to 0.2.x.
 
-The ledger lives in memory and is appended to `<state_dir>/sessions/<session id>.context.jsonl` (0600, one JSON object per line), so a relay-backport restart inside a live session keeps what it already forwarded. It is a durability nicety, never a delivery gate: a ledger that cannot be written costs a restart's worth of history, not a mention. The `exec` sink is unchanged — this is a webhook-scoped setting.
+The ledger lives in memory and is appended to `<state_dir>/sessions/<session id>.context.jsonl` (0600, one JSON object per line, each carrying `kind: "block" | "event"` — a line written before 0.3.1 has no `kind` and reads as a block), so a relay-backport restart inside a live session keeps what it already forwarded. It is a durability nicety, never a delivery gate: a ledger that cannot be written costs a restart's worth of history, not a mention. The `exec` sink is unchanged — this is a webhook-scoped setting.
 
 ### A minimal receiver
 
@@ -332,8 +334,8 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `file.path` | `RELAY_BACKPORT_FILE` | `<state_dir>/deliveries.jsonl` | The file the `file` sink appends to and `tail` follows |
 | `file.system_prompt` | `RELAY_BACKPORT_FILE_SYSTEM_PROMPT` | `true` | Write the session's system prompt to `<state_dir>/sessions/<id>.system-prompt.md` once, and name it in the `EVENT|session|new|…` line |
 | `file.buzz_env_file` | `RELAY_BACKPORT_FILE_BUZZ_ENV_FILE` | — (off) | Path to (re)write the present `BUZZ_RELAY_URL` / `BUZZ_PRIVATE_KEY` / `BUZZ_AUTH_TAG` to, on every `session/new` — holds the agent's private key; see [Security notes](#security-notes) |
-| `webhook.thread_context` | `RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT` | `delta` | `cumulative` also carries every thread-context block the session has seen |
-| `webhook.cumulative_max_chars` | `RELAY_BACKPORT_WEBHOOK_CUMULATIVE_MAX_CHARS` | `32000` | Bound on `thread_context_cumulative`; oldest blocks dropped first |
+| `webhook.thread_context` | `RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT` | `delta` | `cumulative` also carries every thread-context block the session has seen and every mention already delivered in it |
+| `webhook.cumulative_max_chars` | `RELAY_BACKPORT_WEBHOOK_CUMULATIVE_MAX_CHARS` | `32000` | Bound on `thread_context_cumulative`; oldest entries dropped first |
 | `webhook.url` | `RELAY_BACKPORT_WEBHOOK_URL` | — | Required for the webhook sink |
 | `webhook.bearer_file` | `RELAY_BACKPORT_WEBHOOK_BEARER_FILE` | — | File holding a bearer token sent as `Authorization: Bearer …`; never logged |
 | `webhook.timeout_ms` | `RELAY_BACKPORT_WEBHOOK_TIMEOUT_MS` | `8000` | Per-attempt timeout |
