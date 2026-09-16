@@ -144,6 +144,46 @@ A Buzz harness sends its standing context **once per session** (on `session/new`
 
 **Why forward verbatim, not reshaped.** The instruction *text* Buzz sends (its base prompt, the per-turn framing) moved dozens of times in the 60 days before this release; the *shape* relay-backport reads it through moved far less. Any local rewrite, summary, or template of that text goes stale the next time upstream edits its wording — and there is no way for relay-backport to know when that happens. Passing it through unmodified is the only version that cannot drift out of sync with what Buzz actually sent.
 
+## Observe: see what the agent sees
+
+The harness builds a prompt and hands it over; after that it is invisible — the `file` sink caps content at 400 characters and the `webhook` sink POSTs into somebody else's server. `relay-backport observe` puts that material on a page.
+
+```sh
+relay-backport observe            # http://127.0.0.1:7479/ — loopback, no auth, nothing on disk
+```
+
+Feed it with the sink you already have. Run the observe server in one terminal, and give the harness a second sink pointed at it:
+
+```sh
+export RELAY_BACKPORT_SINKS=file,webhook
+export RELAY_BACKPORT_WEBHOOK_URL=http://127.0.0.1:7479/ingest
+```
+
+In **Buzz Desktop**, that is the agent's custom-harness `env` block — the file sink keeps feeding `relay-backport tail`, the webhook sink feeds the page:
+
+```json
+{
+  "id": "relay-backport", "label": "relay-backport", "command": "relay-backport", "args": ["acp"],
+  "env": {
+    "RELAY_BACKPORT_SINKS": "file,webhook",
+    "RELAY_BACKPORT_WEBHOOK_URL": "http://127.0.0.1:7479/ingest"
+  }
+}
+```
+
+The page is one self-contained document — no script tag pointing anywhere, no stylesheet, no font, no CDN, no telemetry; the only connection it opens is the SSE stream on the server that served it. Deliveries arrive live over `/events`, and the last `--buffer` of them (default 200) are replayed when you open or reload the page.
+
+Each delivery is one card, newest first, in two columns:
+
+- **left — what the relay event was**: kind, event id, thread root, how the harness resolved the event (`meta` / `text` / `synthetic`), the message content and the tags.
+- **right — what the agent would see**: the **full prompt**, exactly as the harness built it, plus the session's **system prompt** (the standing conventions block, when the sink attached one) and a **Buzz identity** block — relay URL, session id, cwd, title, sender, channel. Each section is collapsible and its summary line carries a byte count and an approximate token count (`chars / 4`).
+
+The sidebar is the point of the whole thing: a **session context** panel, one row per ACP session, with a cumulative token estimate so you can watch a window grow across a thread. The standing system prompt is counted **once per session** — the harness sends it on `session/new` only, and the webhook sink re-attaches that same text to every POST, so counting it per turn would multiply 20-40 KB by the turn count and overstate the window by an order of magnitude. Per-turn prompts are counted every turn. Totals are kept on the server, so they stay right even after the ring buffer has evicted the early cards.
+
+`--port N` (default `7479`; `0` picks a free one), `--buffer N` (default `200`), `--bind ADDR` (default `127.0.0.1`). There is no authentication and no persistence, which is exactly why it binds to loopback: it is a debugging mirror of traffic you already receive, not an API. Restarting it loses everything.
+
+**It shows only what the harness accepted.** The respond-to gate ("who can send instructions") is Buzz's and runs *before* a prompt ever reaches relay-backport, so a message the harness declined never appears here — silence on the page means either nothing was sent, or the gate dropped it upstream, and the page cannot tell you which.
+
 ## Configuration
 
 Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT_CONFIG`) < `RELAY_BACKPORT_*` environment < CLI flags. See [`deploy/relay-backport.example.toml`](deploy/relay-backport.example.toml) and [`.env.example`](.env.example). Every variable is prefixed so it can never collide with what the harness injects.
@@ -169,7 +209,7 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 
 Buzz's own variables (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, …) are not configuration for relay-backport: `BUZZ_RELAY_URL` is copied into payloads as `relay`, the key and any API token are registered with the log redactor at startup, and none of them is read otherwise.
 
-CLI: `relay-backport [acp] [--config PATH] [--sink NAME]… [--file PATH] [--state-dir PATH] [--log-format FMT] [--verbose]` · `relay-backport tail [--file PATH] [--lines N] [--no-follow] [--config PATH]` · `--help` · `--version`. Exit codes: `0` ok, `1` configuration or usage.
+CLI: `relay-backport [acp] [--config PATH] [--sink NAME]… [--file PATH] [--state-dir PATH] [--log-format FMT] [--verbose]` · `relay-backport tail [--file PATH] [--lines N] [--no-follow] [--config PATH]` · `relay-backport observe [--port N] [--buffer N] [--bind ADDR]` · `--help` · `--version`. Exit codes: `0` ok, `1` configuration or usage.
 
 ## Sinks
 
@@ -229,6 +269,7 @@ v0.2 therefore keeps only what `buzz-acp` does not do — delivery to tools that
 - Buzz's injected key and any API token are registered with the log redactor at startup and never read; the exec hook does not see them unless `exec.pass_buzz_env` says so. A webhook bearer is masked the same way.
 - **`file.buzz_env_file` writes the agent's own private key to disk in plaintext** (`BUZZ_PRIVATE_KEY`, alongside `BUZZ_RELAY_URL` and `BUZZ_AUTH_TAG`). It exists so a terminal session with no other way to reach the harness's environment can `source` it and act as the agent through the `buzz` CLI — treat that file exactly like a private key file (mode 0600 where the platform honours file modes — not on Windows; keep its directory out of backups and screen shares). Off by default; turn it on only for a consumer that needs to *act* as the agent, not merely read its mentions.
 - The system prompt, wherever it lands (the sibling file, a webhook body, an exec hook's stdin), is Buzz's own conventions text — not a secret, but treat a file holding it like the delivery log: it can contain the agent's persona and team instructions.
+- `relay-backport observe` is the one command that listens on a socket: loopback by default, no authentication, no persistence, and it holds full prompt text in memory. Do not `--bind` it to a routable address, and close the page when you are done — anyone who can reach that port can read every prompt the agent received. It is never part of the `acp` path: the harness never starts it, and nothing breaks when it is not running.
 - relay-backport opens no network socket of its own and never publishes on the relay. Its only outputs are the sinks and the JSON-RPC stream on stdout.
 - The delivery file is 0600 in a 0700 directory. It holds message content; treat it like a log.
 - Delivery is at-least-once (the harness may re-prompt after a cancel or a restart). Receivers must be idempotent on `event_id`.
@@ -243,7 +284,7 @@ bun run build            # dist/relay-backport-{linux-x64,darwin-arm64,windows-x
 RELAY_BACKPORT_BIN=$PWD/dist/relay-backport-darwin-arm64 bun test test/binary.test.ts
 ```
 
-Layout: `src/cli.ts` · `src/config.ts` · `src/acp-server.ts` (JSON-RPC server) · `src/prompt.ts` (prompt → event) · `src/delivery.ts` (record, `MENTION|` line, payload) · `src/sinks/{file,webhook,exec}.ts` · `src/tail.ts` · `src/log.ts` · `test/` · `deploy/` · `docs/` · `.github/workflows/` · `CHANGELOG.md`.
+Layout: `src/cli.ts` · `src/config.ts` · `src/acp-server.ts` (JSON-RPC server) · `src/prompt.ts` (prompt → event) · `src/delivery.ts` (record, `MENTION|` line, payload) · `src/sinks/{file,webhook,exec}.ts` · `src/tail.ts` · `src/observe.ts` (the loopback page) · `src/log.ts` · `test/` · `deploy/` · `docs/` · `.github/workflows/` · `CHANGELOG.md`.
 
 ## License
 
