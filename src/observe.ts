@@ -398,6 +398,7 @@ document.getElementById('ver').textContent = BOOT.name + ' ' + BOOT.version + ' 
 var list = document.getElementById('list');
 var sesslist = document.getElementById('sesslist');
 var sessions = {};
+var seen = {};
 var n = 0;
 function el(tag, cls, text){ var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
 function num(x){ return (x||0).toLocaleString(); }
@@ -425,6 +426,8 @@ function renderSessions(){
   });
 }
 function render(rec){
+  if (seen[rec.seq]) return; // /events replays the buffer on every reconnect
+  seen[rec.seq] = 1;
   var empty = list.querySelector('.empty'); if (empty) empty.remove();
   var row = el('div','rec');
   var top = el('div','top');

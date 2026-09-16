@@ -208,7 +208,12 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
         const server = startObserveServer({ host, port, buffer });
         io.out(`${NAME} observe on http://${host}:${server.port}/ — POST deliveries to http://${host}:${server.port}/ingest`);
         await new Promise<void>((resolve) => {
+          let stopped = false;
           const stop = () => {
+            if (stopped) return;
+            stopped = true;
+            process.off("SIGINT", stop);
+            process.off("SIGTERM", stop);
             server.stop();
             resolve();
           };
