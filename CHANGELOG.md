@@ -2,36 +2,9 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## 0.3.0 — unreleased
+## 0.3.0 — YYYY-MM-DD
 
-### Added
-
-- **`webhook.thread_context = "delta" | "cumulative"`** (`RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT`, default `delta`) and **`webhook.cumulative_max_chars`** (`RELAY_BACKPORT_WEBHOOK_CUMULATIVE_MAX_CHARS`, default `32000`). In `cumulative` mode every POST carries a new field, **`thread_context_cumulative`**: every `<thread-context>` (or `<conversation-context>`) block the ACP session has seen, oldest first, including the current turn's. Over the bound, whole blocks are dropped from the oldest end and the payload carries `thread_context_truncated: true`.
-- The reason it is needed: `buzz-acp` builds a thread's history **once per session** — the first prompt of a thread carries the block, and every later prompt in that session says instead that "Earlier thread context was already delivered in this session". Correct for a long-lived agent process; wrong for a stateless webhook, which then gets the history on request one and a bare delta forever after. relay-backport keeps the ledger the receiver does not have.
-- The per-session ledger is in memory and appended to `<state_dir>/sessions/<session id>.context.jsonl` (0600, one JSON object per line, de-duplicated on `event_id` so a retry is not recorded twice), so a relay-backport restart inside a live session keeps what it already forwarded. A ledger that cannot be read or written is never a delivery failure: an unparsable line is skipped, a failed write is swallowed, and the POST goes out regardless.
-- The context block is parsed with the same outermost-span rule as the event framing, so a forged `</thread-context>` inside a message body cannot truncate the real block.
-
-### Notes
-
-- **A new field, not a rewritten prompt.** `prompt` stays exactly what the harness built — it is what the observe page renders verbatim and derives its per-session token estimate from, and prepending history there would double-count it. In the default `delta` mode the payload is byte-identical to 0.2.x, the field simply absent.
-- Webhook-scoped: the `exec` sink shares the payload builder but is unchanged, and gets no `exec.thread_context` key until something asks for one.
-
-## 0.3.0 — unreleased
-
-### Added
-
-- **`relay-backport tail` keeps a persistent line cursor** (`<state_dir>/tail.cursor`, `--cursor PATH` to move it): the number of lines it has handed to its consumer, advanced after every line and written atomically (temp file + rename, so a crash mid-write leaves the previous value rather than a truncated one). On start the tail resumes from that number instead of from the end of the file, printing `EVENT|catchup|N line(s) written while the tail was down` before it replays the gap. A cursor that is missing, empty or unparsable reads as `0` — an untrustworthy cursor replays rather than skips.
-- Rotation and truncation are detected two ways: fewer lines in the file than the cursor claims (at start), and a changed inode or a shrunken size (while following). Either resets the cursor to `0` and replays from the top.
-
-### Changed
-
-- **The cursor is ON by default, which changes what a fresh `tail` prints.** Before 0.3 a tail started at the end of the file and showed only what arrived next; from 0.3 a tail with no cursor file replays everything already in the file, then follows. This is the point — a Monitor or supervisor restart used to silently drop every mention delivered during the gap. **`--no-cursor` restores the old behaviour exactly**, and is the only mode in which `--lines N` applies; `--lines` with a cursor is a usage error rather than a silently ignored flag, and so is `--cursor` together with `--no-cursor`.
-
-### Notes
-
-- No sink, payload, config-file key or `MENTION|` line changes. The cursor is a `tail` concern only: the `acp` path, the file sink's format and every consumer of it are untouched, and a consumer that never restarts sees no difference.
-
-## 0.3.0 — unreleased
+**Two shapes, both of them now supported end to end: a terminal session that tails a file, and a webhook that keeps no state.** 0.2.x shipped the pieces; 0.3 closes the gaps that stopped either shape working unattended. The terminal shape lost mentions on every restart — the tail now carries a cursor. Running the harness headlessly meant an operator-maintained shell script per machine — `run` absorbs it. And a webhook received a thread's history exactly once, then deltas forever — `cumulative` mode keeps the ledger a stateless receiver cannot.
 
 ### Added
 
@@ -41,11 +14,25 @@ All notable changes to relay-backport. The format follows [Keep a Changelog](htt
 - The child gets `--session-title … --no-memory --lazy-pool --no-typing --multiple-event-handling queue`, and `BUZZ_ACP_AGENT_ARGS=acp,--state-dir,…,--sink,…`. `queue` rather than the `steer` default: steering cancels an in-flight turn and re-dispatches a merged prompt, which for a file sink duplicates the mention. The state dir and sink list are passed **both** as `RELAY_BACKPORT_*` env and as flags in `BUZZ_ACP_AGENT_ARGS` (which win), so an env-scrubbing harness still lands deliveries in the right file.
 - **`--observe`** adds the `webhook` sink to the child and points `RELAY_BACKPORT_WEBHOOK_URL` at the local observe page's `/ingest`, failing the preflight when the page is not up. The probe is a `GET` of the page root, not of `/ingest`, which is POST-only.
 - **Preflight** (`OK` / `WARN` / `FAIL`; any `FAIL` means nothing starts): binary resolves, key file present with mode 0600 and a plausible size, allowlist non-empty, state dir writable or creatable, no other harness under the same `--session-title`, and the observe page under `--observe`. A relay that does not answer its NIP-11 probe is a **`WARN`**, not a `FAIL` — `buzz-acp` dials and retries the websocket itself, so refusing to start over one blipped HTTPS probe would be the worse bug. The duplicate-title check needs `pgrep`, so it degrades to a `WARN` where that cannot be asked (Windows).
+- **`relay-backport tail` keeps a persistent line cursor** (`<state_dir>/tail.cursor`, `--cursor PATH` to move it): the number of lines it has handed to its consumer, advanced after every line and written atomically (temp file + rename, so a crash mid-write leaves the previous value rather than a truncated one). On start the tail resumes from that number instead of from the end of the file, printing `EVENT|catchup|N line(s) written while the tail was down` before it replays the gap. A cursor that is missing, empty or unparsable reads as `0` — an untrustworthy cursor replays rather than skips.
+- Rotation and truncation are detected two ways: fewer lines in the file than the cursor claims (at start), and a changed inode or a shrunken size (while following). Either resets the cursor to `0` and replays from the top.
+- **`webhook.thread_context = "delta" | "cumulative"`** (`RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT`, default `delta`) and **`webhook.cumulative_max_chars`** (`RELAY_BACKPORT_WEBHOOK_CUMULATIVE_MAX_CHARS`, default `32000`). In `cumulative` mode every POST carries a new field, **`thread_context_cumulative`**: every `<thread-context>` (or `<conversation-context>`) block the ACP session has seen, oldest first, including the current turn's. Over the bound, whole blocks are dropped from the oldest end and the payload carries `thread_context_truncated: true`.
+- The reason it is needed: `buzz-acp` builds a thread's history **once per session** — the first prompt of a thread carries the block, and every later prompt in that session says instead that "Earlier thread context was already delivered in this session". Correct for a long-lived agent process; wrong for a stateless webhook, which then gets the history on request one and a bare delta forever after. relay-backport keeps the ledger the receiver does not have.
+- The per-session ledger is in memory and appended to `<state_dir>/sessions/<session id>.context.jsonl` (0600, one JSON object per line, de-duplicated on `event_id` so a retry is not recorded twice), so a relay-backport restart inside a live session keeps what it already forwarded. A ledger that cannot be read or written is never a delivery failure: an unparsable line is skipped, a failed write is swallowed, and the POST goes out regardless.
+- The context block is parsed with the same outermost-span rule as the event framing, so a forged `</thread-context>` inside a message body cannot truncate the real block.
+
+### Changed
+
+- **The cursor is ON by default, which changes what a fresh `tail` prints.** Before 0.3 a tail started at the end of the file and showed only what arrived next; from 0.3 a tail with no cursor file replays everything already in the file, then follows. This is the point — a Monitor or supervisor restart used to silently drop every mention delivered during the gap. **`--no-cursor` restores the old behaviour exactly**, and is the only mode in which `--lines N` applies; `--lines` with a cursor is a usage error rather than a silently ignored flag, and so is `--cursor` together with `--no-cursor`.
 
 ### Notes
 
+- README rewritten around the two shapes: **(A) a Claude Code interactive terminal session** — `run`, the `file` sink, `tail` with its cursor, the one-line Monitor command, what a `MENTION|` line looks like, how gap replay works, the observe page; and **(B) a webhook agent (stateless receiver)** — the payload fields, when to turn `include_system_prompt` off, cumulative thread context, and a minimal receiver. The reference sections (configuration table, sinks, architecture, security) are unchanged.
 - No sink, payload, config-file key or `MENTION|` line change to any existing path; `run` is additive, and `acp`, `tail` and `observe` behave exactly as in 0.2.2.
 - `run` reads one unprefixed variable, `BUZZ_ACP_BIN` — Buzz's own name for it. Every other setting it owns is `RELAY_BACKPORT_RUN_*`.
+- No sink, payload, config-file key or `MENTION|` line changes. The cursor is a `tail` concern only: the `acp` path, the file sink's format and every consumer of it are untouched, and a consumer that never restarts sees no difference.
+- **A new field, not a rewritten prompt.** `prompt` stays exactly what the harness built — it is what the observe page renders verbatim and derives its per-session token estimate from, and prepending history there would double-count it. In the default `delta` mode the payload is byte-identical to 0.2.x, the field simply absent.
+- Webhook-scoped: the `exec` sink shares the payload builder but is unchanged, and gets no `exec.thread_context` key until something asks for one.
 
 ## 0.2.2 — 2026-09-16
 
