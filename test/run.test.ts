@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { main } from "../src/cli";
 import { loadConfig } from "../src/config";
 import {
@@ -123,6 +123,40 @@ describe("run: the plan", () => {
     expect(plan.env.RELAY_BACKPORT_SINKS).toBe("file");
     expect(plan.env.RELAY_BACKPORT_WEBHOOK_URL).toBeUndefined();
     expect(plan.keyBytes).toBe(65);
+  });
+
+  test("agent args carry --config when a config path is given, and not when it is absent", () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const cfg = runConfig(t.dir);
+    const without = buildPlan({
+      run: cfg.run,
+      stateDir: cfg.stateDir,
+      sinks: cfg.sinks,
+      observe: false,
+      env: {},
+      execPath: "/usr/bin/bun",
+      mainPath: "/app/src/cli.ts",
+    });
+    expect(without.env.BUZZ_ACP_AGENT_ARGS).toBe(`/app/src/cli.ts,acp,--state-dir,${t.dir},--sink,file`);
+    expect(without.env.BUZZ_ACP_AGENT_ARGS).not.toContain("--config");
+    expect(without.env.RELAY_BACKPORT_CONFIG).toBeUndefined();
+
+    const configPath = join(t.dir, "rb.toml");
+    const withCfg = buildPlan({
+      run: cfg.run,
+      stateDir: cfg.stateDir,
+      sinks: cfg.sinks,
+      observe: false,
+      env: {},
+      execPath: "/usr/bin/bun",
+      mainPath: "/app/src/cli.ts",
+      configPath,
+    });
+    expect(withCfg.env.BUZZ_ACP_AGENT_ARGS).toBe(`/app/src/cli.ts,acp,--state-dir,${t.dir},--sink,file,--config,${configPath}`);
+    expect(withCfg.env.RELAY_BACKPORT_CONFIG).toBe(configPath);
+    expect(renderPlan(withCfg)).toContain(`--config,${configPath}`);
+    expect(renderPlan(withCfg)).toContain(`RELAY_BACKPORT_CONFIG`);
   });
 
   test("--observe adds the webhook sink and points it at the local ingest endpoint", () => {
@@ -273,9 +307,37 @@ describe("run: the CLI", () => {
     const text = c.outLines.join("\n");
     expect(text).toContain("PREFLIGHT");
     expect(text).toContain("PLAN — exec");
+    expect(text).toContain(`--config,${config}`);
+    expect(text).toContain(`RELAY_BACKPORT_CONFIG`);
     expect(text).toContain("--dry-run: stopping here");
     expect(text).not.toContain(SECRET);
     expect(text).not.toContain("EARS UP");
+  });
+
+  test("a relative config path is forwarded absolute; RELAY_BACKPORT_CONFIG without --config is enough", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const configAbs = join(t.dir, "rb.json");
+    writeFileSync(
+      configAbs,
+      JSON.stringify({
+        state_dir: t.dir,
+        run: {
+          buzz_acp: fakeBinary(t.dir),
+          key_file: keyFile(t.dir),
+          relay_url: "ws://127.0.0.1:1",
+          owner: ALICE,
+          allowlist: [ALICE, BOB],
+        },
+      }),
+    );
+    const configRel = relative(process.cwd(), configAbs);
+    expect(isAbsolute(configRel)).toBe(false);
+    const c = io({ RELAY_BACKPORT_CONFIG: configRel });
+    expect(await main(["run", "--dry-run"], c)).toBe(0);
+    const text = c.outLines.join("\n");
+    expect(text).toContain(`--config,${configAbs}`);
+    expect(text).toContain(`RELAY_BACKPORT_CONFIG`);
   });
 
   test("run without run.key_file is a usage error", async () => {
