@@ -4,7 +4,8 @@
 // ACP stream: `relay-backport tail` follows the file and prints exactly
 // those lines, so a Claude Code Monitor tool consumes them unchanged.
 //
-//   MENTION|{kind, from (8 hex | "unknown"), h, content, id, tags, rootId?, truncated?}
+//   MENTION|{kind, from (8 hex | "unknown"), h, content, id, tags, rootId?,
+//            truncated?, thread_context?, thread_truncated?}
 //   EVENT|session|new|<session id>
 //   EVENT|session|new|<session id>|<absolute path to the system prompt file>
 //   EVENT|session|cancel|<session id>
@@ -35,6 +36,18 @@ import { closeSync, mkdirSync, openSync, renameSync, writeFileSync, writeSync } 
 import { dirname, join } from "node:path";
 import { formatMentionLine, type Delivery } from "../delivery";
 import { log, errMessage } from "../log";
+import {
+  boundEntries,
+  capEntry,
+  extractThreadContext,
+  formatDeliveredEvent,
+  kindOf,
+  DEFAULT_FILE_THREAD_CONTEXT_MAX_CHARS,
+  ThreadContextLedger,
+  type FileThreadContextMode,
+  type LedgerEntry,
+  type ThreadContextEntry,
+} from "../thread-context";
 import type { LifecycleEvent, Sink } from "./index";
 
 export type FileSinkOptions = {
@@ -48,9 +61,23 @@ export type FileSinkOptions = {
   buzzEnvFile?: string;
   /** Cap the MENTION line's `content` at this many characters. 0 (default) = unlimited. */
   contentMaxChars?: number;
+  /** `none` | `new` | `cumulative` thread context on the MENTION line. Default `cumulative`. */
+  threadContext?: FileThreadContextMode;
+  /** Bound on the whole `thread_context` block; oldest entries dropped first. 0 = unlimited. */
+  threadContextMaxChars?: number;
+  /** Test seam: the ledger to use instead of the sink's own. */
+  ledger?: ThreadContextLedger;
   /** Where the Buzz-injected env comes from. Default `process.env`. */
   env?: Record<string, string | undefined>;
 };
+
+/**
+ * This sink's own per-session ledger file, `sessions/<id>.file-context.jsonl`.
+ * Separate from the webhook's `.context.jsonl` on purpose: de-duplication is
+ * in memory and per instance, so two sinks sharing one file would write every
+ * entry twice and double the history a restart reads back.
+ */
+export const FILE_LEDGER_SUFFIX = "file-context";
 
 /** The Buzz-injected identity variables a terminal session needs to call the `buzz` CLI as the agent. */
 export const BUZZ_ENV_VARS = ["BUZZ_RELAY_URL", "BUZZ_PRIVATE_KEY", "BUZZ_AUTH_TAG"];
@@ -96,6 +123,17 @@ export class FileSink implements Sink {
   private readonly buzzEnvFile: string | undefined;
   private readonly env: Record<string, string | undefined>;
   private readonly contentMaxChars: number;
+  private readonly threadContextMode: FileThreadContextMode;
+  private readonly threadContextMaxChars: number;
+  private readonly ledger: ThreadContextLedger | undefined;
+  /**
+   * Per session, how many ledger entries the previous `MENTION|` line of that
+   * session already carried — the window `new` mode emits from. In memory
+   * only: a restart mid-session starts a fresh window (the next line then
+   * carries only what arrives after it), which is why `cumulative`, not `new`,
+   * is the default.
+   */
+  private readonly mark = new Map<string, number>();
 
   constructor(opts: FileSinkOptions) {
     this.path = opts.path;
@@ -104,11 +142,60 @@ export class FileSink implements Sink {
     this.buzzEnvFile = opts.buzzEnvFile;
     this.env = opts.env ?? process.env;
     this.contentMaxChars = opts.contentMaxChars ?? 0;
+    this.threadContextMode = opts.threadContext ?? "cumulative";
+    this.threadContextMaxChars = opts.threadContextMaxChars ?? DEFAULT_FILE_THREAD_CONTEXT_MAX_CHARS;
+    if (this.threadContextMode !== "none") {
+      // Its OWN ledger file. The webhook sink keeps `sessions/<id>.context.jsonl`;
+      // two ledgers sharing one file would each append every entry, because
+      // de-duplication is in memory and per instance.
+      this.ledger = opts.ledger ?? new ThreadContextLedger(this.stateDir, 0, { suffix: FILE_LEDGER_SUFFIX });
+    }
+  }
+
+  /**
+   * The thread context for one delivery, and the ledger bookkeeping around it.
+   *
+   * Order matters and mirrors the webhook sink: the block this prompt carried
+   * is recorded FIRST (so this turn's own history is in the field), the window
+   * is read, the mark is set to that point, and the delivered mention is
+   * recorded LAST — this turn's text is already in `content`, so it belongs to
+   * turns N+1.. and not to this one. The exclusion is by event id, because
+   * delivery is at-least-once and a redelivered turn must still exclude itself.
+   *
+   * The invariant `new` mode holds: turn N carries turn N's block (when the
+   * prompt had one) plus turn N-1's delivered mention, and nothing else.
+   */
+  private threadContextFor(delivery: Delivery): { entries: ThreadContextEntry[]; truncated: boolean } {
+    if (!this.ledger) return { entries: [], truncated: false };
+    const sessionId = delivery.session.id;
+    const known = this.ledger.entries(sessionId);
+    if (!this.mark.has(sessionId)) this.mark.set(sessionId, known.length);
+    const block = extractThreadContext(delivery.prompt);
+    if (block) this.ledger.append(sessionId, { event_id: delivery.event.id, at: delivery.receivedAt, text: block, kind: "block" });
+
+    const all = this.ledger.entries(sessionId);
+    const from = this.threadContextMode === "new" ? Math.min(this.mark.get(sessionId) ?? 0, all.length) : 0;
+    const window: LedgerEntry[] = all.slice(from).filter((e) => !(kindOf(e) === "event" && e.event_id === delivery.event.id));
+    this.mark.set(sessionId, all.length);
+
+    this.ledger.append(sessionId, {
+      event_id: delivery.event.id,
+      at: delivery.receivedAt,
+      text: formatDeliveredEvent(delivery.event),
+      kind: "event",
+    });
+
+    const capped = window.map((e) => capEntry(e, this.contentMaxChars));
+    return boundEntries(capped, this.threadContextMaxChars);
   }
 
   async deliver(delivery: Delivery): Promise<boolean> {
     try {
-      appendLine(this.path, formatMentionLine(delivery.event, this.contentMaxChars));
+      const thread = this.threadContextFor(delivery);
+      appendLine(
+        this.path,
+        formatMentionLine(delivery.event, this.contentMaxChars, { threadContext: thread.entries, threadTruncated: thread.truncated }),
+      );
       log.info("file delivered", { event: delivery.event.id, path: this.path });
       return true;
     } catch (err) {

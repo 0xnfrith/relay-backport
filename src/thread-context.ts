@@ -32,6 +32,21 @@ export const THREAD_CONTEXT_MODES: ThreadContextMode[] = ["delta", "cumulative"]
 export const DEFAULT_CUMULATIVE_MAX_CHARS = 32_000;
 
 /**
+ * The file sink's modes. It carries the ledger as STRUCTURED entries on the
+ * `MENTION|` line rather than as the webhook's single joined string, so it can
+ * mark one over-long message `"truncated": true` the way the line's own
+ * `content` is marked — a per-entry flag has nowhere to live inside a string.
+ *
+ * `none` keeps the line exactly as 0.3.2 wrote it. `cumulative` is the whole
+ * ledger, as the webhook's `thread_context_cumulative` carries it. `new` is
+ * only what the ledger gained since the previous `MENTION|` line of that
+ * session — for a consumer that reads every line and keeps its own history.
+ */
+export type FileThreadContextMode = "none" | "new" | "cumulative";
+export const FILE_THREAD_CONTEXT_MODES: FileThreadContextMode[] = ["none", "new", "cumulative"];
+export const DEFAULT_FILE_THREAD_CONTEXT_MAX_CHARS = 32_000;
+
+/**
  * The tags `buzz-acp` wraps history in, in the order they are tried. A prompt
  * carries at most one; `thread-context` is a reply chain, `conversation-context`
  * is recent channel traffic.
@@ -116,8 +131,58 @@ export function accumulate(entries: LedgerEntry[], maxChars: number): Accumulate
   return { text, truncated, entries: kept.length };
 }
 
-export function ledgerPath(stateDir: string, sessionId: string): string {
-  return join(stateDir, "sessions", `${sessionId}.context.jsonl`);
+/**
+ * The webhook's ledger, `sessions/<session id>.context.jsonl`. A second sink
+ * keeping its own ledger passes its own `suffix`: de-duplication is per
+ * ledger INSTANCE and in memory, so two instances appending to one file would
+ * write every entry twice and double the history after a restart.
+ */
+export const DEFAULT_LEDGER_SUFFIX = "context";
+
+export function ledgerPath(stateDir: string, sessionId: string, suffix: string = DEFAULT_LEDGER_SUFFIX): string {
+  return join(stateDir, "sessions", `${sessionId}.${suffix}.jsonl`);
+}
+
+/** A ledger entry as a sink puts it on the wire, with the per-entry cap applied. */
+export type ThreadContextEntry = {
+  kind: LedgerKind;
+  event_id: string;
+  at: number;
+  text: string;
+  /** Present only when `maxChars` actually cut this entry's text. */
+  truncated?: true;
+};
+
+/** Cap one entry's text. `maxChars` 0 means unlimited, as `file.content_max_chars` does. */
+export function capEntry(e: LedgerEntry, maxChars: number): ThreadContextEntry {
+  const capped = maxChars > 0 && e.text.length > maxChars;
+  return {
+    kind: kindOf(e),
+    event_id: e.event_id,
+    at: e.at,
+    text: capped ? e.text.slice(0, maxChars) : e.text,
+    ...(capped ? { truncated: true as const } : {}),
+  };
+}
+
+/**
+ * Bound a list of entries by the total length of their texts, dropping WHOLE
+ * entries from the oldest end until it fits — the newest context is the one
+ * the consumer most needs, and half an entry is worse than no entry. 0 means
+ * unlimited. A single entry over the bound is kept whole rather than emptying
+ * the list; the per-entry cap is the knob for that case.
+ */
+export function boundEntries<T extends { text: string }>(entries: T[], maxChars: number): { entries: T[]; truncated: boolean } {
+  if (maxChars <= 0) return { entries, truncated: false };
+  const kept: T[] = [];
+  let total = 0;
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const e = entries[i]!;
+    if (total + e.text.length > maxChars && kept.length > 0) break;
+    kept.unshift(e);
+    total += e.text.length;
+  }
+  return { entries: kept, truncated: kept.length < entries.length };
 }
 
 /**
@@ -135,8 +200,15 @@ export class ThreadContextLedger {
     private readonly io: {
       read?: (p: string) => string;
       append?: (p: string, line: string) => void;
+      /** Which `sessions/<id>.<suffix>.jsonl` this ledger owns. One file per sink. */
+      suffix?: string;
     } = {},
   ) {}
+
+  /** This ledger's file for a session. */
+  path(sessionId: string): string {
+    return ledgerPath(this.stateDir, sessionId, this.io.suffix ?? DEFAULT_LEDGER_SUFFIX);
+  }
 
   /** The entries for a session, read from disk the first time it is asked for. */
   entries(sessionId: string): LedgerEntry[] {
@@ -145,7 +217,7 @@ export class ThreadContextLedger {
     const loaded: LedgerEntry[] = [];
     try {
       const read = this.io.read ?? ((p: string) => readFileSync(p, "utf8"));
-      for (const line of read(ledgerPath(this.stateDir, sessionId)).split("\n")) {
+      for (const line of read(this.path(sessionId)).split("\n")) {
         if (!line.trim()) continue;
         try {
           const e = JSON.parse(line) as LedgerEntry;
@@ -179,7 +251,7 @@ export class ThreadContextLedger {
         appendFileSync(p, line + "\n", { mode: 0o600 });
       });
     try {
-      write(ledgerPath(this.stateDir, sessionId), JSON.stringify(entry));
+      write(this.path(sessionId), JSON.stringify(entry));
     } catch {
       // The ledger is a durability nicety: losing the file costs a restart's
       // worth of history, not a delivery. Never fail a delivery over it.

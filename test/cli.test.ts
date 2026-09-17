@@ -34,6 +34,11 @@ describe("argument parsing", () => {
     expect(parseArgs([]).command).toBeUndefined();
     expect(parseArgs(["-h"]).flags.help).toBe(true);
     expect(parseArgs(["-v"]).flags.version).toBe(true);
+    expect(parseArgs(["tail", "--no-thread"]).flags["no-thread"]).toBe(true);
+    expect(overridesFromFlags(parseArgs(["--file-thread-context", "new", "--file-thread-context-max-chars", "10"]).flags).file).toEqual({
+      thread_context: "new",
+      thread_context_max_chars: "10",
+    });
   });
 
   test("a value flag without a value, a boolean flag with one, or an unknown short option is an error", () => {
@@ -139,6 +144,28 @@ describe("main", () => {
     expect(await main(["tail", "--no-follow", "--cursor", other], elsewhere)).toBe(0);
     expect(elsewhere.outLines.length).toBe(3);
     expect(await Bun.file(other).text()).toBe("2\n");
+  });
+
+  test("tail --no-thread prints MENTION lines without their thread context, and advances the cursor all the same", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const file = join(t.dir, "deliveries.jsonl");
+    const withThread = `MENTION|${JSON.stringify({ kind: 9, from: "1a2b3c4d", h: "c", content: "hi", id: "e", tags: [], thread_context: [{ kind: "block", event_id: "e", at: 1, text: "history" }] })}`;
+    writeFileSync(file, `EVENT|session|new|s1\n${withThread}\n`);
+
+    const stripped = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["tail", "--no-follow", "--no-thread"], stripped)).toBe(0);
+    expect(stripped.outLines).toContain("EVENT|session|new|s1");
+    const line = stripped.outLines.find((l) => l.startsWith("MENTION|"))!;
+    expect(line).not.toContain("thread_context");
+    expect(JSON.parse(line.slice("MENTION|".length))).toEqual({ kind: 9, from: "1a2b3c4d", h: "c", content: "hi", id: "e", tags: [] });
+    // consumed, not skipped: the cursor counts both lines
+    expect(await Bun.file(join(t.dir, "tail.cursor")).text()).toBe("2\n");
+
+    // without the flag the field is on the line
+    const whole = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["tail", "--no-follow", "--cursor", join(t.dir, "other.cursor")], whole)).toBe(0);
+    expect(whole.outLines.some((l) => l.includes("thread_context"))).toBe(true);
   });
 
   test("tail rejects --cursor with --no-cursor, and --lines with a cursor", async () => {

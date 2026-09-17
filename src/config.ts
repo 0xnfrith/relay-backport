@@ -24,6 +24,8 @@ export const DEFAULT_WEBHOOK_ATTEMPTS = 3;
 export const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 export const DEFAULT_DELIVERY_WAIT_MS = 15_000;
 export const DEFAULT_CUMULATIVE_MAX_CHARS = 32_000;
+export const DEFAULT_FILE_THREAD_CONTEXT: "none" | "new" | "cumulative" = "cumulative";
+export const DEFAULT_FILE_THREAD_CONTEXT_MAX_CHARS = 32_000;
 export const DEFAULT_BUZZ_ACP_BIN = "buzz-acp";
 export const DEFAULT_SESSION_TITLE = "relay-backport-ears";
 export const DEFAULT_SESSION_POLICY = "thread";
@@ -46,6 +48,16 @@ export type FileConfig = {
   buzzEnvFile?: string;
   /** Cap the MENTION line's `content` at this many characters. 0 (default) = unlimited. */
   contentMaxChars: number;
+  /**
+   * What the MENTION line carries of the session's thread context.
+   * `none`: nothing, the 0.3.2 line exactly. `new` (default `cumulative`'s
+   * lean sibling): only what the ledger gained since the previous MENTION line
+   * of that session. `cumulative`: the whole session ledger, as the webhook's
+   * `thread_context_cumulative` carries it.
+   */
+  threadContext: "none" | "new" | "cumulative";
+  /** Bound on the whole `thread_context` block; oldest entries dropped first. 0 = unlimited. */
+  threadContextMaxChars: number;
 };
 
 export type WebhookConfig = {
@@ -119,7 +131,14 @@ export type RawConfig = {
   sinks?: string[] | string;
   log_format?: string;
   delivery_wait_ms?: number | string;
-  file?: { path?: string; system_prompt?: boolean | string; buzz_env_file?: string; content_max_chars?: number | string };
+  file?: {
+    path?: string;
+    system_prompt?: boolean | string;
+    buzz_env_file?: string;
+    content_max_chars?: number | string;
+    thread_context?: string;
+    thread_context_max_chars?: number | string;
+  };
   webhook?: {
     url?: string;
     bearer_file?: string;
@@ -191,12 +210,23 @@ export function rawFromEnv(env: EnvMap): RawConfig {
   const fileSystemPrompt = get("FILE_SYSTEM_PROMPT");
   const fileBuzzEnvFile = get("FILE_BUZZ_ENV_FILE");
   const fileContentMaxChars = get("FILE_CONTENT_MAX_CHARS");
-  if (file || fileSystemPrompt !== undefined || fileBuzzEnvFile || fileContentMaxChars !== undefined) {
+  const fileThreadContext = get("FILE_THREAD_CONTEXT");
+  const fileThreadContextMaxChars = get("FILE_THREAD_CONTEXT_MAX_CHARS");
+  if (
+    file ||
+    fileSystemPrompt !== undefined ||
+    fileBuzzEnvFile ||
+    fileContentMaxChars !== undefined ||
+    fileThreadContext !== undefined ||
+    fileThreadContextMaxChars !== undefined
+  ) {
     raw.file = {};
     if (file) raw.file.path = file;
     if (fileSystemPrompt !== undefined) raw.file.system_prompt = fileSystemPrompt;
     if (fileBuzzEnvFile) raw.file.buzz_env_file = fileBuzzEnvFile;
     if (fileContentMaxChars !== undefined) raw.file.content_max_chars = fileContentMaxChars;
+    if (fileThreadContext !== undefined) raw.file.thread_context = fileThreadContext;
+    if (fileThreadContextMaxChars !== undefined) raw.file.thread_context_max_chars = fileThreadContextMaxChars;
   }
   const url = get("WEBHOOK_URL");
   const bearer = get("WEBHOOK_BEARER_FILE");
@@ -288,6 +318,13 @@ function toCommand(v: string[] | string | undefined): string[] | undefined {
   return v.split(/\s+/).filter(Boolean);
 }
 
+/** The file sink's three modes. Its own set: `delta` has no meaning on a line-per-delivery file. */
+function parseFileThreadContext(v: string | undefined): "none" | "new" | "cumulative" {
+  const s = (v ?? DEFAULT_FILE_THREAD_CONTEXT).trim().toLowerCase();
+  if (s === "none" || s === "new" || s === "cumulative") return s;
+  throw new ConfigError('file.thread_context must be "none", "new" or "cumulative"');
+}
+
 function parseThreadContext(v: string | undefined): "delta" | "cumulative" {
   const s = (v ?? "delta").trim().toLowerCase();
   if (s === "delta" || s === "cumulative") return s;
@@ -358,6 +395,8 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       systemPrompt: toBool(raw.file?.system_prompt, true, "file.system_prompt"),
       buzzEnvFile: raw.file?.buzz_env_file?.trim() ? resolve(raw.file.buzz_env_file.trim()) : undefined,
       contentMaxChars: toInt(raw.file?.content_max_chars, DEFAULT_FILE_CONTENT_MAX_CHARS, "file.content_max_chars", 0),
+      threadContext: parseFileThreadContext(raw.file?.thread_context),
+      threadContextMaxChars: toInt(raw.file?.thread_context_max_chars, DEFAULT_FILE_THREAD_CONTEXT_MAX_CHARS, "file.thread_context_max_chars", 0),
     };
   }
 
@@ -431,7 +470,14 @@ export function describeConfig(cfg: Config): Record<string, unknown> {
     delivery_wait_ms: cfg.deliveryWaitMs,
     relay: cfg.relayUrl || null,
     file: cfg.file
-      ? { path: cfg.file.path, system_prompt: cfg.file.systemPrompt, buzz_env_file: cfg.file.buzzEnvFile ?? null, content_max_chars: cfg.file.contentMaxChars }
+      ? {
+          path: cfg.file.path,
+          system_prompt: cfg.file.systemPrompt,
+          buzz_env_file: cfg.file.buzzEnvFile ?? null,
+          content_max_chars: cfg.file.contentMaxChars,
+          thread_context: cfg.file.threadContext,
+          thread_context_max_chars: cfg.file.threadContextMaxChars,
+        }
       : null,
     webhook: cfg.webhook
       ? {

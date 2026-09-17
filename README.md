@@ -91,6 +91,19 @@ MENTION|{"kind":9,"from":"1a2b3c4d","h":"<channel uuid>","content":"…","id":"<
 
 `from` is the first 8 hex chars of the sender (`unknown` when the prompt carried no sender), `content` is the message text **whole** — this line is the delivery, not a preview of it, so a cap here drops instructions off the end of a long message — and `rootId` is added for forum replies (kind 45003). Set `file.content_max_chars` to cap it anyway (0, the default, means unlimited); a cap that actually bites adds `"truncated":true` to the line, so a consumer can tell a short message from a clipped one. Before 0.3.2 the cap was a fixed 400 characters with no flag. Session lifecycle shows up as `EVENT|session|new|<id>` (or `EVENT|session|new|<id>|<path>` when the system prompt was written to disk — `file.system_prompt`, on by default), `EVENT|session|cancel|<id>`, `EVENT|acp|closed`. Read that system prompt file once at the head of the session — see [What the consumer receives](#what-the-consumer-receives).
 
+Since 0.3.3 the line also carries **`thread_context`**: the session's thread history, so a consumer that reads only the line it woke on can still see what came before it. `buzz-acp` builds a thread's history **once per session** — the first prompt of a thread carries a `<thread-context>` block, and every later prompt just says the context was already delivered — so without this, turn 2 of a conversation arrives with no copy of turn 1 anywhere. relay-backport keeps that ledger per session and puts it on the line:
+
+```
+MENTION|{"kind":9,"from":"1a2b3c4d","h":"<channel uuid>","content":"what word?","id":"<event id>","tags":[["h","…"]],"thread_context":[{"kind":"block","event_id":"<event id>","at":1750000000000,"text":"<the harness's thread history>"},{"kind":"event","event_id":"<earlier event id>","at":1750000001000,"text":"[previously delivered mention] from <pubkey> · <ISO time> · event <id>\nremember the word HARBOR"}],"thread_truncated":true}
+```
+
+Entries are oldest first, in delivery order: `kind: "block"` is history the harness built, `kind: "event"` is a mention that was itself delivered earlier in this session. The current turn's own text is never repeated there — it is already in `content`. `file.content_max_chars` caps each entry's `text` (a cap that bites adds `"truncated": true` to that entry, exactly as it does to `content`), and `file.thread_context_max_chars` bounds the whole block, dropping whole entries from the oldest end and adding `"thread_truncated": true` when it does.
+
+`file.thread_context` picks how much of it rides along: **`cumulative`** (the default) is the whole session ledger; **`new`** is only what arrived since the previous `MENTION|` line of that session, for a consumer that reads every line and keeps its own history; **`none`** restores the 0.3.2 line exactly. The webhook sink's equivalent setting is `webhook.thread_context = delta | cumulative` — different values because a webhook receives one POST and nothing else, while a file consumer reads a stream of lines and `new` only makes sense there. The two sinks keep separate ledger files, `sessions/<id>.file-context.jsonl` and `sessions/<id>.context.jsonl`.
+
+Watching the wire by eye, `relay-backport tail --no-thread` strips `thread_context` and `thread_truncated` from the lines it prints (it still consumes them, so the cursor advances as usual).
+
+
 ### 3. Gap replay: why a restart does not lose mentions
 
 The delivery file is a queue, and the thing following it will restart — a Monitor re-arms, a terminal is closed, a supervisor cycles. Before 0.3 the tail started at the end of the file, so every mention delivered during that gap was silently dropped, and the consumer had no way to know.
@@ -334,6 +347,8 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `file.path` | `RELAY_BACKPORT_FILE` | `<state_dir>/deliveries.jsonl` | The file the `file` sink appends to and `tail` follows |
 | `file.system_prompt` | `RELAY_BACKPORT_FILE_SYSTEM_PROMPT` | `true` | Write the session's system prompt to `<state_dir>/sessions/<id>.system-prompt.md` once, and name it in the `EVENT|session|new|…` line |
 | `file.content_max_chars` | `RELAY_BACKPORT_FILE_CONTENT_MAX_CHARS` | `0` (unlimited) | Cap the `MENTION|` line's `content` at N characters (CLI: `--file-content-max-chars N`); a cap that bites adds `"truncated":true` |
+| `file.thread_context` | `RELAY_BACKPORT_FILE_THREAD_CONTEXT` | `cumulative` | What the `MENTION|` line carries of the session's thread history: `none` (the 0.3.2 line), `new` (only what arrived since the previous line of that session), `cumulative` (the whole session ledger). CLI: `--file-thread-context MODE` |
+| `file.thread_context_max_chars` | `RELAY_BACKPORT_FILE_THREAD_CONTEXT_MAX_CHARS` | `32000` (0 = unlimited) | Bound on the whole `thread_context` block; whole entries dropped from the oldest end, `"thread_truncated":true` when they are. CLI: `--file-thread-context-max-chars N` |
 | `file.buzz_env_file` | `RELAY_BACKPORT_FILE_BUZZ_ENV_FILE` | — (off) | Path to (re)write the present `BUZZ_RELAY_URL` / `BUZZ_PRIVATE_KEY` / `BUZZ_AUTH_TAG` to, on every `session/new` — holds the agent's private key; see [Security notes](#security-notes) |
 | `webhook.thread_context` | `RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT` | `delta` | `cumulative` also carries every thread-context block the session has seen and every mention already delivered in it |
 | `webhook.cumulative_max_chars` | `RELAY_BACKPORT_WEBHOOK_CUMULATIVE_MAX_CHARS` | `32000` | Bound on `thread_context_cumulative`; oldest entries dropped first |
@@ -353,7 +368,7 @@ CLI: `relay-backport run [--config PATH] [--dry-run] [--observe]` · `relay-back
 
 ## Sinks
 
-- **`file`** — one `MENTION|{json}` line per delivery plus `EVENT|…` lifecycle lines, each a single append to a 0600 file whose directory is created on demand; `relay-backport tail` is its reader. The v0.1 stdout contract, moved to a file because stdout now belongs to ACP. On `session/new` it also (optionally) writes the system prompt to a sibling file and, when configured, the harness's `BUZZ_*` identity to a `.env`-shaped file — both 0600, both atomic writes.
+- **`file`** — one `MENTION|{json}` line per delivery (with the session's `thread_context` on it unless `file.thread_context = "none"`) plus `EVENT|…` lifecycle lines, each a single append to a 0600 file whose directory is created on demand; `relay-backport tail` is its reader. The v0.1 stdout contract, moved to a file because stdout now belongs to ACP. On `session/new` it also (optionally) writes the system prompt to a sibling file and, when configured, the harness's `BUZZ_*` identity to a `.env`-shaped file — both 0600, both atomic writes.
 - **`webhook`** — JSON POST with retry/backoff; optional bearer from a file; the session's system prompt rides along by default.
 - **`exec`** — one process per delivery, JSON on stdin, concurrency 1, timeout, minimal environment (opt-in `BUZZ_*` passthrough, opt-in system prompt).
 

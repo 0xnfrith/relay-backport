@@ -2,6 +2,7 @@
 // the two wire shapes built from it: the `MENTION|{json}` line (frozen since
 // v0.1 so an existing consumer keeps working) and the JSON payload the
 // webhook and exec sinks carry.
+import type { ThreadContextEntry } from "./thread-context";
 
 /** The Buzz event behind a prompt, in Nostr shape. `pubkey` may be empty when unknown. */
 export type EventLike = {
@@ -82,9 +83,26 @@ export type MentionLine = {
   tags: string[][];
   rootId?: string;
   truncated?: true;
+  /**
+   * The session's thread context, oldest first — the `<thread-context>` blocks
+   * the harness has sent and the mentions already delivered in this session,
+   * in delivery order. Added last, and absent both in `file.thread_context =
+   * "none"` and whenever there is nothing to carry, so a line without it is
+   * byte-identical to every version since v0.1.
+   */
+  thread_context?: ThreadContextEntry[];
+  /** True when `file.thread_context_max_chars` dropped the oldest entries. */
+  thread_truncated?: true;
 };
 
 export const UNKNOWN_SENDER = "unknown";
+
+export type MentionLineOptions = {
+  /** The session's thread context, already capped and bounded by the sink. */
+  threadContext?: ThreadContextEntry[];
+  /** The bound dropped the oldest entries from `threadContext`. */
+  threadTruncated?: boolean;
+};
 
 /**
  * `content` is delivered whole by default. `maxChars` > 0 caps it — and a cap
@@ -92,11 +110,16 @@ export const UNKNOWN_SENDER = "unknown";
  * message from a clipped one. 0 (the default) means unlimited: the MENTION
  * line is the delivery channel into a session, not a preview of it, so
  * dropping the tail of a long message drops instructions.
+ *
+ * `opts.threadContext`, when the sink is not in `none` mode, is appended after
+ * every field the line has ever carried, so a consumer that ignores unknown
+ * keys is unaffected.
  */
-export function buildMentionLine(ev: EventLike, maxChars = 0): MentionLine {
+export function buildMentionLine(ev: EventLike, maxChars = 0, opts: MentionLineOptions = {}): MentionLine {
   const rootId = rootIdOf(ev);
   const full = ev.content ?? "";
   const capped = maxChars > 0 && full.length > maxChars;
+  const thread = opts.threadContext?.length ? opts.threadContext : undefined;
   return {
     kind: ev.kind,
     from: ev.pubkey ? ev.pubkey.slice(0, 8) : UNKNOWN_SENDER,
@@ -106,11 +129,12 @@ export function buildMentionLine(ev: EventLike, maxChars = 0): MentionLine {
     tags: ev.tags,
     ...(rootId ? { rootId } : {}),
     ...(capped ? { truncated: true as const } : {}),
+    ...(thread ? { thread_context: thread, ...(opts.threadTruncated ? { thread_truncated: true as const } : {}) } : {}),
   };
 }
 
-export function formatMentionLine(ev: EventLike, maxChars = 0): string {
-  return `MENTION|${JSON.stringify(buildMentionLine(ev, maxChars))}`;
+export function formatMentionLine(ev: EventLike, maxChars = 0, opts: MentionLineOptions = {}): string {
+  return `MENTION|${JSON.stringify(buildMentionLine(ev, maxChars, opts))}`;
 }
 
 /** The JSON the webhook POSTs and the exec hook reads on stdin. */

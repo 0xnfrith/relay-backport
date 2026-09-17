@@ -55,7 +55,7 @@ describe("config loading", () => {
     expect(cfg.stateDir).toBe("/var/lib/rb");
     expect(cfg.sinks).toEqual(["file", "webhook", "exec"]);
     expect(cfg.deliveryWaitMs).toBe(2500);
-    expect(cfg.file).toEqual({ path: "/var/log/rb/deliveries.jsonl", systemPrompt: true, buzzEnvFile: undefined, contentMaxChars: 0 });
+    expect(cfg.file).toEqual({ path: "/var/log/rb/deliveries.jsonl", systemPrompt: true, buzzEnvFile: undefined, contentMaxChars: 0, threadContext: "cumulative", threadContextMaxChars: 32_000 });
     expect(cfg.webhook).toEqual({ url: "https://hooks.example.com/x", bearerFile: undefined, timeoutMs: 1234, attempts: 3, includeSystemPrompt: true, threadContext: "delta", cumulativeMaxChars: 32_000 });
     expect(cfg.exec).toEqual({ command: ["/usr/local/bin/handle", "--from-relay"], timeoutMs: 60_000, passBuzzEnv: true, includeSystemPrompt: false });
     expect(cfg.configPath).toBe("/etc/rb.toml");
@@ -188,7 +188,7 @@ include_system_prompt = true
 `
           : readFile(p),
     });
-    expect(cfg.file).toEqual({ path: cfg.file!.path, systemPrompt: false, buzzEnvFile: "/s/buzz.env", contentMaxChars: 0 });
+    expect(cfg.file).toEqual({ path: cfg.file!.path, systemPrompt: false, buzzEnvFile: "/s/buzz.env", contentMaxChars: 0, threadContext: "cumulative", threadContextMaxChars: 32_000 });
     expect(cfg.webhook?.includeSystemPrompt).toBe(false);
     expect(cfg.exec?.includeSystemPrompt).toBe(true);
   });
