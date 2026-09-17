@@ -125,6 +125,40 @@ describe("run: the plan", () => {
     expect(plan.keyBytes).toBe(65);
   });
 
+  test("agent args carry --config when a config path is given, and not when it is absent", () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const cfg = runConfig(t.dir);
+    const without = buildPlan({
+      run: cfg.run,
+      stateDir: cfg.stateDir,
+      sinks: cfg.sinks,
+      observe: false,
+      env: {},
+      execPath: "/usr/bin/bun",
+      mainPath: "/app/src/cli.ts",
+    });
+    expect(without.env.BUZZ_ACP_AGENT_ARGS).toBe(`/app/src/cli.ts,acp,--state-dir,${t.dir},--sink,file`);
+    expect(without.env.BUZZ_ACP_AGENT_ARGS).not.toContain("--config");
+    expect(without.env.RELAY_BACKPORT_CONFIG).toBeUndefined();
+
+    const configPath = join(t.dir, "rb.toml");
+    const withCfg = buildPlan({
+      run: cfg.run,
+      stateDir: cfg.stateDir,
+      sinks: cfg.sinks,
+      observe: false,
+      env: {},
+      execPath: "/usr/bin/bun",
+      mainPath: "/app/src/cli.ts",
+      configPath,
+    });
+    expect(withCfg.env.BUZZ_ACP_AGENT_ARGS).toBe(`/app/src/cli.ts,acp,--state-dir,${t.dir},--sink,file,--config,${configPath}`);
+    expect(withCfg.env.RELAY_BACKPORT_CONFIG).toBe(configPath);
+    expect(renderPlan(withCfg)).toContain(`--config,${configPath}`);
+    expect(renderPlan(withCfg)).toContain(`RELAY_BACKPORT_CONFIG`);
+  });
+
   test("--observe adds the webhook sink and points it at the local ingest endpoint", () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);
@@ -273,6 +307,8 @@ describe("run: the CLI", () => {
     const text = c.outLines.join("\n");
     expect(text).toContain("PREFLIGHT");
     expect(text).toContain("PLAN — exec");
+    expect(text).toContain(`--config,${config}`);
+    expect(text).toContain(`RELAY_BACKPORT_CONFIG`);
     expect(text).toContain("--dry-run: stopping here");
     expect(text).not.toContain(SECRET);
     expect(text).not.toContain("EARS UP");

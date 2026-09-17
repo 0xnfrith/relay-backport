@@ -110,6 +110,8 @@ export type BuildPlanOptions = {
   env: Record<string, string | undefined>;
   execPath: string;
   mainPath: string;
+  /** Config file `run` was started with (`--config` or `RELAY_BACKPORT_CONFIG`). Forwarded to the agent child. */
+  configPath?: string;
   exists?: (p: string) => boolean;
   readFile?: (p: string) => string;
   statSize?: (p: string) => number;
@@ -135,6 +137,7 @@ export function buildPlan(opts: BuildPlanOptions): RunPlan {
   const self = run.self ? { command: resolve(run.self), prefixArgs: [] as string[] } : selfInvocation(opts.execPath, opts.mainPath);
   const agentArgs = [...self.prefixArgs, "acp", "--state-dir", opts.stateDir];
   for (const s of sinks) agentArgs.push("--sink", s);
+  if (opts.configPath) agentArgs.push("--config", opts.configPath);
 
   let storeKeys: string[] = [];
   if (run.allowlistFile) {
@@ -163,6 +166,7 @@ export function buildPlan(opts: BuildPlanOptions): RunPlan {
     RELAY_BACKPORT_STATE_DIR: opts.stateDir,
     RELAY_BACKPORT_SINKS: sinks.join(","),
   };
+  if (opts.configPath) env.RELAY_BACKPORT_CONFIG = opts.configPath;
   if (opts.observe) env.RELAY_BACKPORT_WEBHOOK_URL = run.observeIngestUrl;
 
   const args = [

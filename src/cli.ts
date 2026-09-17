@@ -248,6 +248,7 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
           env: io.env,
           execPath: process.execPath,
           mainPath: Bun.main,
+          configPath: cfg.configPath,
         });
         io.out("PREFLIGHT");
         const checks = await preflight({
