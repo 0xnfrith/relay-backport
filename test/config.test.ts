@@ -65,6 +65,7 @@ describe("config loading", () => {
     const cfg = loadConfig({ env: { RELAY_BACKPORT_CONFIG: "/etc/rb.json" }, readFile });
     expect(cfg.sinks).toEqual(["webhook"]);
     expect(cfg.webhook?.attempts).toBe(1);
+    expect(cfg.configPath).toBe("/etc/rb.json");
     const layered = loadConfig({
       configPath: "/etc/rb.toml",
       env: { RELAY_BACKPORT_SINKS: "file", RELAY_BACKPORT_FILE: "/env/deliveries.jsonl", RELAY_BACKPORT_LOG_FORMAT: "json" },

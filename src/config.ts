@@ -368,8 +368,9 @@ export function loadConfig(opts: LoadOptions = {}): Config {
   for (const name of BUZZ_SECRET_ENV) registerSecret(trimEnv(env[name]));
 
   let raw: RawConfig = {};
-  const configPath = opts.configPath ?? trimEnv(env.RELAY_BACKPORT_CONFIG);
+  let configPath = opts.configPath ?? trimEnv(env.RELAY_BACKPORT_CONFIG);
   if (configPath) {
+    configPath = resolve(configPath);
     let text: string;
     try {
       text = readFile(configPath);

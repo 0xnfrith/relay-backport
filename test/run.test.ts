@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { main } from "../src/cli";
 import { loadConfig } from "../src/config";
 import {
@@ -312,6 +312,32 @@ describe("run: the CLI", () => {
     expect(text).toContain("--dry-run: stopping here");
     expect(text).not.toContain(SECRET);
     expect(text).not.toContain("EARS UP");
+  });
+
+  test("a relative config path is forwarded absolute; RELAY_BACKPORT_CONFIG without --config is enough", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const configAbs = join(t.dir, "rb.json");
+    writeFileSync(
+      configAbs,
+      JSON.stringify({
+        state_dir: t.dir,
+        run: {
+          buzz_acp: fakeBinary(t.dir),
+          key_file: keyFile(t.dir),
+          relay_url: "ws://127.0.0.1:1",
+          owner: ALICE,
+          allowlist: [ALICE, BOB],
+        },
+      }),
+    );
+    const configRel = relative(process.cwd(), configAbs);
+    expect(isAbsolute(configRel)).toBe(false);
+    const c = io({ RELAY_BACKPORT_CONFIG: configRel });
+    expect(await main(["run", "--dry-run"], c)).toBe(0);
+    const text = c.outLines.join("\n");
+    expect(text).toContain(`--config,${configAbs}`);
+    expect(text).toContain(`RELAY_BACKPORT_CONFIG`);
   });
 
   test("run without run.key_file is a usage error", async () => {
