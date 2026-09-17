@@ -15,7 +15,7 @@ import { configureLog, log, errMessage } from "./log";
 import { DEFAULT_BIND, DEFAULT_BUFFER, DEFAULT_PORT, startObserveServer } from "./observe";
 import { buildSinks } from "./sinks/index";
 import { buildPlan, pgrepSessionTitle, preflight, probeUrl, renderPlan, runHarness } from "./run";
-import { tailFile } from "./tail";
+import { stripThreadContext, tailFile } from "./tail";
 import { NAME, VERSION } from "./version";
 import { join, resolve } from "node:path";
 
@@ -37,6 +37,13 @@ OPTIONS (all commands)
   --file-content-max-chars N
                        cap the MENTION line's content; or RELAY_BACKPORT_FILE_CONTENT_MAX_CHARS
                        (default 0 = unlimited; a cap that bites adds "truncated": true)
+  --file-thread-context MODE
+                       none | new | cumulative (default cumulative); or
+                       RELAY_BACKPORT_FILE_THREAD_CONTEXT — how much of the session's
+                       thread context each MENTION line carries in thread_context
+  --file-thread-context-max-chars N
+                       bound the whole thread_context block (default 32000, 0 = unlimited);
+                       or RELAY_BACKPORT_FILE_THREAD_CONTEXT_MAX_CHARS
   --log-format FMT     text | json (stderr; stdout is the ACP stream / the tail output)
   --verbose            debug logging
 
@@ -55,6 +62,7 @@ OPTIONS (tail)
                        restart replays the lines written while the tail was down
   --no-cursor          no cursor: follow from the end of the file, as before 0.3
   --lines N            print the last N lines before following (--no-cursor only; default 0)
+  --no-thread          strip thread_context from MENTION lines (for a human watching the wire)
   --no-follow          print and exit
 
 OPTIONS (observe)
@@ -74,8 +82,22 @@ export type ParsedArgs = {
   flags: Record<string, string | boolean | string[]>;
 };
 
-const VALUE_FLAGS = new Set(["config", "state-dir", "file", "file-content-max-chars", "sink", "log-format", "lines", "cursor", "port", "buffer", "bind"]);
-const BOOL_FLAGS = new Set(["help", "version", "verbose", "no-follow", "no-cursor", "dry-run", "observe"]);
+const VALUE_FLAGS = new Set([
+  "config",
+  "state-dir",
+  "file",
+  "file-content-max-chars",
+  "file-thread-context",
+  "file-thread-context-max-chars",
+  "sink",
+  "log-format",
+  "lines",
+  "cursor",
+  "port",
+  "buffer",
+  "bind",
+]);
+const BOOL_FLAGS = new Set(["help", "version", "verbose", "no-follow", "no-cursor", "no-thread", "dry-run", "observe"]);
 const REPEATABLE = new Set(["sink"]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -144,10 +166,14 @@ export function overridesFromFlags(flags: ParsedArgs["flags"]): RawConfig {
   if (stateDir !== undefined) o.state_dir = stateDir;
   const file = str(flags.file);
   const fileContentMax = str(flags["file-content-max-chars"]);
-  if (file !== undefined || fileContentMax !== undefined) {
+  const fileThreadContext = str(flags["file-thread-context"]);
+  const fileThreadMax = str(flags["file-thread-context-max-chars"]);
+  if (file !== undefined || fileContentMax !== undefined || fileThreadContext !== undefined || fileThreadMax !== undefined) {
     o.file = {};
     if (file !== undefined) o.file.path = file;
     if (fileContentMax !== undefined) o.file.content_max_chars = fileContentMax;
+    if (fileThreadContext !== undefined) o.file.thread_context = fileThreadContext;
+    if (fileThreadMax !== undefined) o.file.thread_context_max_chars = fileThreadMax;
   }
   if (Array.isArray(flags.sink)) o.sinks = flags.sink;
   const logFormat = str(flags["log-format"]);
@@ -263,10 +289,13 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
           throw new ConfigError("--lines applies to --no-cursor tailing; with a cursor, the cursor decides where the tail starts");
         }
         const cursorPath = noCursor ? undefined : resolve(cursorFlag ?? join(cfg.stateDir, DEFAULT_TAIL_CURSOR_NAME));
-        log.info("following", { path: cfg.file!.path, cursor: cursorPath ?? null, lines: n });
+        const noThread = args.flags["no-thread"] === true;
+        log.info("following", { path: cfg.file!.path, cursor: cursorPath ?? null, lines: n, thread_context: !noThread });
         await tailFile({
           path: cfg.file!.path,
-          write: (l) => io.out(l),
+          // Stripping happens here, in the write path: the tail still CONSUMES
+          // every line (and so advances its cursor past it), it just prints less.
+          write: (l) => io.out(noThread ? stripThreadContext(l) : l),
           lines: n,
           follow: args.flags["no-follow"] !== true,
           cursorPath,

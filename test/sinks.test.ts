@@ -360,3 +360,189 @@ describe("exec sink", () => {
     expect(JSON.parse(await Bun.file(out).text()).system_prompt).toBe("be terse");
   });
 });
+
+describe("file sink thread context", () => {
+  /** One delivery in a named session, with a prompt that may carry a `<thread-context>` block. */
+  function turn(sessionId: string, content: string, block?: string): Delivery {
+    const d = delivery(content);
+    return {
+      ...d,
+      session: { id: sessionId, cwd: "/tmp" },
+      prompt: block ? `<thread-context>\n${block}\n</thread-context>\n${content}` : content,
+    };
+  }
+
+  /** The parsed MENTION lines a run produced, in order. */
+  function mentions(path: string): Record<string, unknown>[] {
+    return readFileSync(path, "utf8")
+      .trimEnd()
+      .split("\n")
+      .filter((l) => l.startsWith("MENTION|"))
+      .map((l) => JSON.parse(l.slice("MENTION|".length)) as Record<string, unknown>);
+  }
+
+  type Entry = { kind: string; event_id: string; at: number; text: string; truncated?: true };
+  const entries = (m: Record<string, unknown>): Entry[] => (m.thread_context as Entry[] | undefined) ?? [];
+
+  test('"none" leaves the line exactly as 0.3.2 wrote it', async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "d.jsonl");
+    const sink = new FileSink({ path, stateDir: t.dir, threadContext: "none" });
+    const a = turn("none-1", "first", "history A");
+    await sink.deliver(a);
+    await sink.deliver(turn("none-1", "second", "history B"));
+    const lines = mentions(path);
+    expect(lines.every((m) => !("thread_context" in m) && !("thread_truncated" in m))).toBe(true);
+    expect(readFileSync(path, "utf8").split("\n")[0]).toBe(
+      `MENTION|${JSON.stringify({ kind: 9, from: SENDER.slice(0, 8), h: CHANNEL, content: "first", id: a.event.id, tags: a.event.tags })}`,
+    );
+    expect(existsSync(join(t.dir, "sessions"))).toBe(false);
+  });
+
+  test('"cumulative" carries every block and every mention delivered before this one — never this turn\'s own', async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "d.jsonl");
+    const sink = new FileSink({ path, stateDir: t.dir });
+    const a = turn("cum-1", "remember HARBOR", "history A");
+    const b = turn("cum-1", "what word?");
+    const c = turn("cum-1", "and again?", "history C");
+    await sink.deliver(a);
+    await sink.deliver(b);
+    await sink.deliver(c);
+    const [m1, m2, m3] = mentions(path);
+
+    expect(entries(m1!).map((e) => e.kind)).toEqual(["block"]);
+    expect(entries(m1!)[0]!.text).toContain("history A");
+
+    // turn 2: turn 1's block plus turn 1's mention; not turn 2's own text
+    expect(entries(m2!).map((e) => e.kind)).toEqual(["block", "event"]);
+    expect(entries(m2!)[1]!.text).toContain("remember HARBOR");
+    expect(entries(m2!)[1]!.event_id).toBe(a.event.id);
+    expect(entries(m2!).some((e) => e.event_id === b.event.id)).toBe(false);
+
+    // turn 3: everything before it, in delivery order, plus its own block
+    expect(entries(m3!).map((e) => e.kind)).toEqual(["block", "event", "event", "block"]);
+    expect(entries(m3!).map((e) => e.event_id)).toEqual([a.event.id, a.event.id, b.event.id, c.event.id]);
+    expect(m3!.thread_truncated).toBeUndefined();
+
+    // its own ledger file, not the webhook's
+    expect(existsSync(join(t.dir, "sessions", "cum-1.file-context.jsonl"))).toBe(true);
+    expect(existsSync(join(t.dir, "sessions", "cum-1.context.jsonl"))).toBe(false);
+  });
+
+  test('"new" carries only what arrived since the previous MENTION line of that session', async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "d.jsonl");
+    const sink = new FileSink({ path, stateDir: t.dir, threadContext: "new" });
+    const a = turn("new-1", "one", "history A");
+    const b = turn("new-1", "two");
+    const c = turn("new-1", "three", "history C");
+    await sink.deliver(a);
+    await sink.deliver(b);
+    await sink.deliver(c);
+    const [m1, m2, m3] = mentions(path);
+    expect(entries(m1!).map((e) => [e.kind, e.event_id])).toEqual([["block", a.event.id]]);
+    // turn N = turn N's block (when the prompt had one) + turn N-1's mention
+    expect(entries(m2!).map((e) => [e.kind, e.event_id])).toEqual([["event", a.event.id]]);
+    expect(entries(m3!).map((e) => [e.kind, e.event_id])).toEqual([
+      ["event", b.event.id],
+      ["block", c.event.id],
+    ]);
+    // a second session keeps its own window
+    const d2 = turn("new-2", "elsewhere", "history D");
+    await sink.deliver(d2);
+    expect(entries(mentions(path)[3]!).map((e) => e.event_id)).toEqual([d2.event.id]);
+  });
+
+  test("content_max_chars caps each entry's text and marks it truncated", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "d.jsonl");
+    const sink = new FileSink({ path, stateDir: t.dir, contentMaxChars: 10 });
+    await sink.deliver(turn("cap-1", "x".repeat(50), "y".repeat(50)));
+    await sink.deliver(turn("cap-1", "short"));
+    const [, m2] = mentions(path);
+    const block = entries(m2!)[0]!;
+    expect(block.text).toBe("y".repeat(10));
+    expect(block.truncated).toBe(true);
+    expect(entries(m2!)[1]!.text.length).toBe(10);
+    expect(m2!.content).toBe("short"); // under the cap: no flag on the line itself
+    expect(m2!.truncated).toBeUndefined();
+  });
+
+  test("thread_context_max_chars drops whole entries from the oldest end, and says so", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "d.jsonl");
+    const sink = new FileSink({ path, stateDir: t.dir, threadContextMaxChars: 120 });
+    const a = turn("bound-1", "one", "A".repeat(100));
+    const b = turn("bound-1", "two", "B".repeat(100));
+    const c = turn("bound-1", "three", "C".repeat(100));
+    await sink.deliver(a);
+    await sink.deliver(b);
+    await sink.deliver(c);
+    const m3 = mentions(path)[2]!;
+    const texts = entries(m3!).map((e) => e.text);
+    expect(m3.thread_truncated).toBe(true);
+    expect(texts[texts.length - 1]).toBe("C".repeat(100)); // newest kept
+    expect(texts.some((x) => x.startsWith("A".repeat(100)))).toBe(false); // oldest dropped
+    expect(texts.join("").length).toBeLessThanOrEqual(120);
+
+    // 0 means unlimited
+    const un = new FileSink({ path: join(t.dir, "u.jsonl"), stateDir: join(t.dir, "u"), threadContextMaxChars: 0 });
+    await un.deliver(turn("unbound-1", "one", "A".repeat(100_000)));
+    await un.deliver(turn("unbound-1", "two"));
+    const u2 = mentions(join(t.dir, "u.jsonl"))[1]!;
+    expect(u2.thread_truncated).toBeUndefined();
+    expect(entries(u2)[0]!.text.length).toBe(100_000);
+  });
+
+  test("a consumer that ignores unknown keys is unaffected: every pre-0.3.3 field keeps its place", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "d.jsonl");
+    const sink = new FileSink({ path, stateDir: t.dir });
+    await sink.deliver(turn("compat-1", "first", "history"));
+    const second = turn("compat-1", "second");
+    await sink.deliver(second);
+    const m2 = mentions(path)[1]!;
+    expect(Object.keys(m2).slice(0, 6)).toEqual(["kind", "from", "h", "content", "id", "tags"]);
+    expect(Object.keys(m2).slice(6)).toEqual(["thread_context"]);
+    expect(m2.content).toBe("second");
+    expect(m2.id).toBe(second.event.id);
+    // and the line still round-trips as one JSON object on one line
+    expect(readFileSync(path, "utf8").trimEnd().split("\n")).toHaveLength(2);
+  });
+
+  test("the file and webhook ledgers are separate files, each with one line per (kind, event)", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "d.jsonl");
+    const file = new FileSink({ path, stateDir: t.dir });
+    const posted: unknown[] = [];
+    const hook = new WebhookSink(
+      { url: "http://127.0.0.1:1/h", timeoutMs: 100, attempts: 1, includeSystemPrompt: false, threadContext: "cumulative" as const, cumulativeMaxChars: 32_000 },
+      () => "",
+      {
+        stateDir: t.dir,
+        fetchImpl: (async (_u: string, init: { body: string }) => {
+          posted.push(JSON.parse(init.body));
+          return new Response("ok", { status: 200 });
+        }) as unknown as typeof fetch,
+      },
+    );
+    const a = turn("both-1", "one", "history A");
+    const b = turn("both-1", "two");
+    for (const d of [a, b]) {
+      await file.deliver(d);
+      await hook.deliver(d);
+    }
+    const count = (p: string) => readFileSync(p, "utf8").trimEnd().split("\n").length;
+    expect(count(join(t.dir, "sessions", "both-1.file-context.jsonl"))).toBe(3); // block + 2 events
+    expect(count(join(t.dir, "sessions", "both-1.context.jsonl"))).toBe(3);
+    expect((posted[1] as { thread_context_cumulative: string }).thread_context_cumulative).toContain("one");
+  });
+});

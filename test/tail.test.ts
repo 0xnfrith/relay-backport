@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { catchupLine, lastLines, lineEnds, readCursor, tailFile, writeCursor } from "../src/tail";
+import { catchupLine, lastLines, lineEnds, readCursor, stripThreadContext, tailFile, writeCursor } from "../src/tail";
 import { waitFor } from "./helpers/acp-client";
 import { tmpDir } from "./helpers/tmp";
 
@@ -270,5 +270,35 @@ describe("tail cursor", () => {
     expect(() => readFileSync(cur, "utf8")).toThrow();
     f.stop();
     await f.done;
+  });
+});
+
+describe("stripThreadContext (tail --no-thread)", () => {
+  const line = (obj: Record<string, unknown>) => `MENTION|${JSON.stringify(obj)}`;
+
+  test("drops thread_context and thread_truncated, keeps every other field in place", () => {
+    const withThread = line({
+      kind: 9,
+      from: "1a2b3c4d",
+      h: "channel",
+      content: "hello",
+      id: "e".repeat(64),
+      tags: [["h", "channel"]],
+      thread_context: [{ kind: "block", event_id: "e".repeat(64), at: 1, text: "history" }],
+      thread_truncated: true,
+    });
+    expect(stripThreadContext(withThread)).toBe(
+      line({ kind: 9, from: "1a2b3c4d", h: "channel", content: "hello", id: "e".repeat(64), tags: [["h", "channel"]] }),
+    );
+  });
+
+  test("a line with no thread context, an EVENT| line and unparsable JSON all pass through verbatim", () => {
+    const plain = line({ kind: 9, from: "1a2b3c4d", h: "c", content: "hi", id: "f".repeat(64), tags: [] });
+    expect(stripThreadContext(plain)).toBe(plain);
+    expect(stripThreadContext("EVENT|session|new|s1")).toBe("EVENT|session|new|s1");
+    expect(stripThreadContext(catchupLine(3))).toBe(catchupLine(3));
+    expect(stripThreadContext("MENTION|{not json")).toBe("MENTION|{not json");
+    expect(stripThreadContext("MENTION|[1,2]")).toBe("MENTION|[1,2]");
+    expect(stripThreadContext("")).toBe("");
   });
 });

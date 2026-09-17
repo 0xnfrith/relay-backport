@@ -2,6 +2,30 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.3.3 — 2026-09-17
+
+**A file-sink consumer could not see the thread it was answering in.** The harness builds a thread's history once per session — turn 1's prompt carries a `<thread-context>` block, every later turn is told the context was already delivered — and the `MENTION|` line carried only the mention itself. A consumer woken by turn 2 therefore had the question and no copy of turn 1 anywhere: the same gap `cumulative` mode closed for the webhook sink in 0.3.0/0.3.1, still open for the file one.
+
+### Added
+
+- **`thread_context` on the `MENTION|` line.** An array of entries, oldest first, in delivery order: `{kind, event_id, at, text, truncated?}`, where `kind: "block"` is a `<thread-context>` (or `<conversation-context>`) block the harness built and `kind: "event"` is a mention already delivered in this session, labelled `[previously delivered mention] from … · … · event …` as the webhook's field labels it. The current turn's own text is never in it — that is already `content`. It is an array rather than the webhook's single joined string because a per-entry `"truncated": true` has nowhere to live inside a string.
+- **`file.thread_context`** (`RELAY_BACKPORT_FILE_THREAD_CONTEXT`, CLI `--file-thread-context`), one of:
+  - `cumulative` (**the default**) — the whole session ledger on every line, for a consumer that reads only the line it woke on;
+  - `new` — only what the ledger gained since the previous `MENTION|` line of that session, for a consumer that reads every line and keeps its own history. The invariant: turn N carries turn N's block (when its prompt had one) plus turn N-1's delivered mention. The window is in memory, so a restart mid-session starts a fresh one;
+  - `none` — the 0.3.2 line exactly.
+- **`file.thread_context_max_chars`** (`RELAY_BACKPORT_FILE_THREAD_CONTEXT_MAX_CHARS`, CLI `--file-thread-context-max-chars`, default `32000`, `0` = unlimited) bounds the whole block: whole entries are dropped from the **oldest** end — the newest context is the one the consumer most needs, and half an entry is worse than none — and the line carries `"thread_truncated": true` when any were. `file.content_max_chars` additionally caps each entry's `text`, marking that entry `"truncated": true` exactly as it marks `content`.
+- **`relay-backport tail --no-thread`** strips `thread_context` and `thread_truncated` from the `MENTION|` lines it prints, for a human watching the wire. Stripping happens in the write path only: the tail still *consumes* every line, so the cursor advances exactly as it does without the flag, and an `EVENT|` line or a `MENTION|` line whose JSON does not parse is printed verbatim rather than dropped.
+- **The file sink keeps its own ledger**, `<state_dir>/sessions/<session id>.file-context.jsonl`, next to the webhook's `.context.jsonl`. Separate files on purpose: de-duplication is in memory and per ledger instance, so two sinks appending to one file would write every entry twice and double the history a restart reads back. Same format, same 0600, same tolerance — an unparsable line is skipped, a failed write is swallowed, and neither is ever a delivery failure.
+
+### Changed
+
+- **The default output of the `file` sink changes.** From turn 2 of a session onward its lines carry the new field, so they are no longer byte-identical to 0.3.2. Every field that line has ever had keeps its name, its value and its position — `thread_context` and `thread_truncated` are appended last, and are absent entirely when there is nothing to carry (turn 1 of a session, for instance) — so a consumer that ignores unknown keys is unaffected. **`file.thread_context = "none"` restores the old line exactly.**
+- Nothing else moves: `EVENT|` lifecycle lines, the cursor, the system-prompt and buzz-env files, the webhook and exec sinks, `thread_context_cumulative` and every existing config key behave as in 0.3.2.
+
+### Notes
+
+- The two sinks deliberately use different mode names — `file.thread_context = none | new | cumulative` against `webhook.thread_context = delta | cumulative`. A webhook receives one POST and nothing else, so its choice is "the delta the harness built" or "everything"; a file consumer reads a stream of lines, where "only what is new since the last line" is a third, useful answer.
+
 ## 0.3.2 — 2026-09-17
 
 **The `MENTION|` line was silently eating the end of long messages.** `content` had been capped at a fixed 400 characters since v0.1, when that line was a human-readable preview printed to stdout. It is now the delivery channel into a terminal session: a message longer than the cap arrived with its tail cut off, with nothing on the line to say so, so a consumer could not tell a short message from a clipped one. A dictated instruction whose last sentence fell past character 400 was simply never seen.

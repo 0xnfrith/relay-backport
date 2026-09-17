@@ -12,6 +12,35 @@
 import { closeSync, mkdirSync, openSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
+export const MENTION_PREFIX = "MENTION|";
+
+/**
+ * `tail --no-thread`: drop `thread_context` / `thread_truncated` from a
+ * MENTION line, for a human watching the wire — the field is the session's
+ * whole history and can be thousands of characters per line.
+ *
+ * A line that is not a MENTION line, or whose JSON does not parse, is returned
+ * VERBATIM: the tail is a queue reader, and a line it cannot understand is
+ * still a line its consumer must see. Filtering happens in the write path
+ * only, never by skipping a line — the cursor counts lines consumed.
+ */
+export function stripThreadContext(line: string): string {
+  if (!line.startsWith(MENTION_PREFIX)) return line;
+  const json = line.slice(MENTION_PREFIX.length);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return line;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return line;
+  const obj = parsed as Record<string, unknown>;
+  if (!("thread_context" in obj) && !("thread_truncated" in obj)) return line;
+  delete obj.thread_context;
+  delete obj.thread_truncated;
+  return MENTION_PREFIX + JSON.stringify(obj);
+}
+
 export type TailOptions = {
   path: string;
   write: (line: string) => void;
