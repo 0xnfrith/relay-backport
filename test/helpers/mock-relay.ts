@@ -5,12 +5,15 @@ type Conn = { authed: boolean; challenge: string };
 
 export type MockRelayOptions = {
   requireAuth?: boolean;
+  /** Reject the first EVENT with auth-required and send the AUTH challenge then; accept after AUTH. */
+  lateAuth?: boolean;
   rejectPublish?: string;
 };
 
 export class MockRelay {
   readonly published: Event[] = [];
   readonly authAttempts: { pubkey: string; ok: boolean }[] = [];
+  readonly eventAttempts: Event[] = [];
   readonly server: ReturnType<typeof Bun.serve<Conn>>;
   private seq = 0;
 
@@ -50,7 +53,14 @@ export class MockRelay {
           }
           if (msg[0] === "EVENT") {
             const ev = msg[1] as Event;
-            if (self.opts.requireAuth && !conn.authed) {
+            self.eventAttempts.push(ev);
+            if ((self.opts.requireAuth || self.opts.lateAuth) && !conn.authed) {
+              if (self.opts.lateAuth && !conn.challenge) {
+                conn.challenge = `challenge-${++self.seq}`;
+                ws.send(JSON.stringify(["OK", ev.id, false, "auth-required: authenticate first"]));
+                ws.send(JSON.stringify(["AUTH", conn.challenge]));
+                return;
+              }
               ws.send(JSON.stringify(["OK", ev.id, false, "auth-required: authenticate first"]));
               return;
             }

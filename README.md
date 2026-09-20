@@ -346,6 +346,7 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `receipt.enabled` | `RELAY_BACKPORT_RECEIPT_ENABLED` | `false` | Publish a kind:7 reaction on a wake that a sink accepted. Off by default |
 | `receipt.reaction` | `RELAY_BACKPORT_RECEIPT_REACTION` | `👀` | Unicode emoji, or a custom-emoji shortcode (`:eyes:`) |
 | `receipt.timeout_ms` | `RELAY_BACKPORT_RECEIPT_TIMEOUT_MS` | `4000` | Bound on the one-shot publish (connect + AUTH + EVENT). A timeout is a warning; delivery still succeeded |
+| `receipt.max_seen` | `RELAY_BACKPORT_RECEIPT_MAX_SEEN` | `5000` | Newest event ids kept in the receipts ledger; compacted on start |
 | `tail` cursor | *(CLI only: `--cursor`)* | `<state_dir>/tail.cursor` | Lines `tail` has already delivered; `--no-cursor` turns it off |
 | `file.path` | `RELAY_BACKPORT_FILE` | `<state_dir>/deliveries.jsonl` | The file the `file` sink appends to and `tail` follows |
 | `file.system_prompt` | `RELAY_BACKPORT_FILE_SYSTEM_PROMPT` | `true` | Write the session's system prompt to `<state_dir>/sessions/<id>.system-prompt.md` once, and name it in the `EVENT|session|new|…` line |
@@ -379,13 +380,14 @@ CLI: `relay-backport run [--config PATH] [--dry-run] [--observe]` · `relay-back
 
 Off by default. When `receipt.enabled` is on, a wake that a sink actually accepted gets one kind:7 reaction on the original event, signed by the harness identity (`BUZZ_PRIVATE_KEY`), published to `BUZZ_RELAY_URL`. The author of the wake can see that the harness received it even while the consumer behind the sinks is still working. There is no model in this path.
 
-- **Once per event id.** The id is appended to `<state_dir>/receipts.seen` before the publish, so a restart or a harness replay does not react twice.
+- **At-least-once per event id.** `<state_dir>/receipts.seen` records `pending <id> …` before the publish and `done <id>` after the relay's OK. A pending line with no done is retried once on start. If the ledger cannot be written, receipts switch off for the process and nothing is published unrecorded. The file keeps the newest `receipt.max_seen` ids (default 5000) and is compacted on start.
 - **Not on filtered events.** If every sink failed (or the turn timed out / was cancelled before a sink accepted), nothing is published.
+- **Not on synthetic prompts.** A plain ACP prompt with no real relay event (no author, no channel) does not get a receipt.
 - **Not on the harness's own messages.** The event author is compared to the pubkey of `BUZZ_PRIVATE_KEY`.
 - **Never fatal.** A failed or timed-out publish logs one warning; the turn already ended.
-- **How it publishes.** This process has no long-lived relay socket — the harness owns that. The receipt opens a one-shot NIP-01 websocket to the same URL, answers NIP-42 AUTH if the relay challenges, sends `EVENT`, waits for `OK`, and closes. Chosen because there was no publish path here, and a one-shot websocket is the smallest honest NIP-01 write; it does not assume an HTTP `/events` bridge.
+- **How it publishes.** This process has no long-lived relay socket — the harness owns that. The receipt opens a one-shot NIP-01 websocket to the same URL, answers NIP-42 AUTH if the relay challenges (including a late `auth-required` OK after EVENT: authenticate and resend once), waits for `OK`, and closes. The harness key is read at publish time, not at startup, and is not parsed at all when receipts are off.
 
-The reaction tags the delivered event (`e`), its author (`p`, when known), the channel (`h`, when known), and the original kind (`k`). Content is `receipt.reaction`.
+The reaction tags the delivered event (`e`), its author (`p`), the channel (`h`), and the original kind (`k`). Content is `receipt.reaction`. No author or no channel means no receipt.
 
 ## Architecture
 
@@ -436,7 +438,7 @@ v0.2 therefore keeps only what `buzz-acp` does not do — delivery to tools that
 
 ## Security notes
 
-- Buzz's injected key and any API token are registered with the log redactor at startup. The key is read only when receipts are enabled, to sign the kind:7. The exec hook does not see the key unless `exec.pass_buzz_env` says so. A webhook bearer is masked the same way.
+- Buzz's injected key and any API token are registered with the log redactor at startup. The key is read only when receipts are enabled, at the moment of a publish (or a pending retry on start), and is not parsed or held when receipts are off. The exec hook does not see the key unless `exec.pass_buzz_env` says so. A webhook bearer is masked the same way.
 - **`file.buzz_env_file` writes the agent's own private key to disk in plaintext** (`BUZZ_PRIVATE_KEY`, alongside `BUZZ_RELAY_URL` and `BUZZ_AUTH_TAG`). It exists so a terminal session with no other way to reach the harness's environment can `source` it and act as the agent through the `buzz` CLI — treat that file exactly like a private key file (mode 0600 where the platform honours file modes — not on Windows; keep its directory out of backups and screen shares). Off by default; turn it on only for a consumer that needs to *act* as the agent, not merely read its mentions.
 - The system prompt, wherever it lands (the sibling file, a webhook body, an exec hook's stdin), is Buzz's own conventions text — not a secret, but treat a file holding it like the delivery log: it can contain the agent's persona and team instructions.
 - `relay-backport observe` is the one command that listens on a socket: loopback by default, no authentication, no persistence, and it holds full prompt text in memory. Do not `--bind` it to a routable address, and close the page when you are done — anyone who can reach that port can read every prompt the agent received. It is never part of the `acp` path: the harness never starts it, and nothing breaks when it is not running.

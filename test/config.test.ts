@@ -42,7 +42,7 @@ describe("config loading", () => {
     expect(cfg.relayUrl).toBe("");
     expect(cfg.webhook).toBeUndefined();
     expect(cfg.exec).toBeUndefined();
-    expect(cfg.receipt).toEqual({ enabled: false, reaction: "👀", timeoutMs: 4000 });
+    expect(cfg.receipt).toEqual({ enabled: false, reaction: "👀", timeoutMs: 4000, maxSeen: 5000 });
   });
 
   test("state dir: XDG_STATE_HOME wins on POSIX, LOCALAPPDATA on Windows", () => {
@@ -95,6 +95,7 @@ describe("config loading", () => {
         RELAY_BACKPORT_RECEIPT_ENABLED: "true",
         RELAY_BACKPORT_RECEIPT_REACTION: ":eyes:",
         RELAY_BACKPORT_RECEIPT_TIMEOUT_MS: "1500",
+        RELAY_BACKPORT_RECEIPT_MAX_SEEN: "100",
         BUZZ_RELAY_URL: "wss://relay.example",
       },
       readFile,
@@ -106,7 +107,7 @@ describe("config loading", () => {
     expect(cfg.exec).toEqual({ command: ["/bin/handle", "--x"], timeoutMs: 9, passBuzzEnv: true, includeSystemPrompt: false });
     expect(cfg.relayUrl).toBe("wss://relay.example");
     expect(cfg.file).toBeUndefined();
-    expect(cfg.receipt).toEqual({ enabled: true, reaction: ":eyes:", timeoutMs: 1500 });
+    expect(cfg.receipt).toEqual({ enabled: true, reaction: ":eyes:", timeoutMs: 1500, maxSeen: 100 });
   });
 
   test("errors: unreadable or unparsable file, unknown sink, missing webhook url / exec command, bad values", () => {
@@ -216,7 +217,7 @@ include_system_prompt = true
     const cfg = loadConfig({ env: { BUZZ_PRIVATE_KEY: key, BUZZ_API_TOKEN: token, BUZZ_AUTH_TAG: tag, BUZZ_RELAY_URL: "wss://r.example", HOME: "/h" }, readFile });
     expect(redact(`k=${key} t=${token} a=${tag}`)).toBe("k=[redacted] t=[redacted] a=[redacted]");
     expect(JSON.stringify(describeConfig(cfg))).not.toContain(key);
-    expect(describeConfig(cfg)).toMatchObject({ sinks: ["file"], relay: "wss://r.example", webhook: null, exec: null, receipt: { enabled: false, reaction: "👀", timeout_ms: 4000 } });
+    expect(describeConfig(cfg)).toMatchObject({ sinks: ["file"], relay: "wss://r.example", webhook: null, exec: null, receipt: { enabled: false, reaction: "👀", timeout_ms: 4000, max_seen: 5000 } });
   });
 
   test("receipt: TOML table, env overlay, describeConfig carries no secret", () => {
@@ -230,10 +231,11 @@ include_system_prompt = true
 enabled = true
 reaction = "👀"
 timeout_ms = 2500
+max_seen = 50
 `
           : readFile(p),
     });
-    expect(cfg.receipt).toEqual({ enabled: true, reaction: "👍", timeoutMs: 2500 });
-    expect(describeConfig(cfg).receipt).toEqual({ enabled: true, reaction: "👍", timeout_ms: 2500 });
+    expect(cfg.receipt).toEqual({ enabled: true, reaction: "👍", timeoutMs: 2500, maxSeen: 50 });
+    expect(describeConfig(cfg).receipt).toEqual({ enabled: true, reaction: "👍", timeout_ms: 2500, max_seen: 50 });
   });
 });

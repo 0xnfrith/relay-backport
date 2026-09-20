@@ -222,9 +222,10 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
           enabled: cfg.receipt.enabled,
           reaction: cfg.receipt.reaction,
           timeoutMs: cfg.receipt.timeoutMs,
+          maxSeen: cfg.receipt.maxSeen,
           stateDir: cfg.stateDir,
           relayUrl: cfg.relayUrl,
-          secret: io.env.BUZZ_PRIVATE_KEY,
+          secret: cfg.receipt.enabled ? () => io.env.BUZZ_PRIVATE_KEY : undefined,
         });
         const server = startAcpServer({
           sinks,

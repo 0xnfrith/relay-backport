@@ -27,6 +27,7 @@ export const DEFAULT_RECEIPT_ENABLED = false;
 export const DEFAULT_RECEIPT_REACTION = "👀";
 export const DEFAULT_RECEIPT_TIMEOUT_MS = 4000;
 export const DEFAULT_RECEIPT_SEEN_NAME = "receipts.seen";
+export const DEFAULT_RECEIPT_MAX_SEEN = 5000;
 export const DEFAULT_CUMULATIVE_MAX_CHARS = 32_000;
 export const DEFAULT_FILE_THREAD_CONTEXT: "none" | "new" | "cumulative" = "cumulative";
 export const DEFAULT_FILE_THREAD_CONTEXT_MAX_CHARS = 32_000;
@@ -101,6 +102,8 @@ export type ReceiptConfig = {
   reaction: string;
   /** Bound on connect + AUTH + publish. A timeout is a warning, never a delivery failure. */
   timeoutMs: number;
+  /** Newest event ids kept in the receipts ledger. Default 5000. */
+  maxSeen: number;
 };
 
 /** `relay-backport run`: what the launcher needs to spawn `buzz-acp`. */
@@ -166,7 +169,7 @@ export type RawConfig = {
     cumulative_max_chars?: number | string;
   };
   exec?: { command?: string[] | string; timeout_ms?: number | string; pass_buzz_env?: boolean | string; include_system_prompt?: boolean | string };
-  receipt?: { enabled?: boolean | string; reaction?: string; timeout_ms?: number | string };
+  receipt?: { enabled?: boolean | string; reaction?: string; timeout_ms?: number | string; max_seen?: number | string };
   run?: {
     buzz_acp?: string;
     key_file?: string;
@@ -277,11 +280,13 @@ export function rawFromEnv(env: EnvMap): RawConfig {
   const receiptEnabled = get("RECEIPT_ENABLED");
   const receiptReaction = get("RECEIPT_REACTION");
   const receiptTimeout = get("RECEIPT_TIMEOUT_MS");
-  if (receiptEnabled !== undefined || receiptReaction || receiptTimeout) {
+  const receiptMaxSeen = get("RECEIPT_MAX_SEEN");
+  if (receiptEnabled !== undefined || receiptReaction || receiptTimeout || receiptMaxSeen) {
     raw.receipt = {};
     if (receiptEnabled !== undefined) raw.receipt.enabled = receiptEnabled;
     if (receiptReaction) raw.receipt.reaction = receiptReaction;
     if (receiptTimeout) raw.receipt.timeout_ms = receiptTimeout;
+    if (receiptMaxSeen) raw.receipt.max_seen = receiptMaxSeen;
   }
   const run: NonNullable<RawConfig["run"]> = {};
   const runGet = (name: string, key: keyof NonNullable<RawConfig["run"]>) => {
@@ -465,6 +470,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     enabled: toBool(raw.receipt?.enabled, DEFAULT_RECEIPT_ENABLED, "receipt.enabled"),
     reaction,
     timeoutMs: toInt(raw.receipt?.timeout_ms, DEFAULT_RECEIPT_TIMEOUT_MS, "receipt.timeout_ms", 1),
+    maxSeen: toInt(raw.receipt?.max_seen, DEFAULT_RECEIPT_MAX_SEEN, "receipt.max_seen", 1),
   };
 
   const runRaw = raw.run ?? {};
@@ -527,7 +533,7 @@ export function describeConfig(cfg: Config): Record<string, unknown> {
         }
       : null,
     exec: cfg.exec ? { command: cfg.exec.command, timeout_ms: cfg.exec.timeoutMs, pass_buzz_env: cfg.exec.passBuzzEnv, include_system_prompt: cfg.exec.includeSystemPrompt } : null,
-    receipt: { enabled: cfg.receipt.enabled, reaction: cfg.receipt.reaction, timeout_ms: cfg.receipt.timeoutMs },
+    receipt: { enabled: cfg.receipt.enabled, reaction: cfg.receipt.reaction, timeout_ms: cfg.receipt.timeoutMs, max_seen: cfg.receipt.maxSeen },
     run: { buzz_acp: cfg.run.buzzAcp, key_file: cfg.run.keyFile || null, session_title: cfg.run.sessionTitle, allowlist: cfg.run.allowlist.length, allowlist_file: cfg.run.allowlistFile ?? null },
     config: cfg.configPath ?? null,
   };

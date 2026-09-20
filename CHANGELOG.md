@@ -7,8 +7,8 @@ All notable changes to relay-backport. The format follows [Keep a Changelog](htt
 ### Added
 
 - **Delivery receipt** (`[receipt]`, off by default). When a sink accepts a wake, relay-backport can publish a kind:7 reaction on that event, signed by the harness identity, so the author sees the wake was received even while the consumer is still working. Config: `receipt.enabled`, `receipt.reaction` (default `👀`, any emoji or a `:shortcode:`), `receipt.timeout_ms` (default 4000). Env: `RELAY_BACKPORT_RECEIPT_ENABLED`, `_REACTION`, `_TIMEOUT_MS`.
-- Once per event id, persisted in `<state_dir>/receipts.seen`. Not published for events no sink accepted, for the harness identity's own messages, or again after a restart/replay of the same id.
-- Publish path: a one-shot NIP-01 websocket to `BUZZ_RELAY_URL` (NIP-42 AUTH if challenged). Failure logs one warning and never fails the delivery. Signing uses `nostr-tools`, bundled into the compiled binary.
+- At-least-once per event id, persisted in `<state_dir>/receipts.seen` as `pending` then `done`. A pending line is retried once on start. Newest `receipt.max_seen` ids (default 5000). Not published for events no sink accepted, synthetic prompts, events without author and channel, the harness identity's own messages, or when the ledger cannot be written.
+- Publish path: a one-shot NIP-01 websocket to `BUZZ_RELAY_URL` (NIP-42 AUTH if challenged, including a late auth-required OK after EVENT: authenticate and resend once). Failure logs one warning and never fails the delivery. The key is read at publish time only. Signing uses `nostr-tools`, bundled into the compiled binary.
 
 ## 0.3.3 — 2026-09-17
 

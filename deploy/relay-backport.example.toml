@@ -61,3 +61,5 @@ enabled = false
 reaction = "👀"
 # Any unicode emoji, or a custom-emoji shortcode such as ":eyes:".
 timeout_ms = 4000
+# Newest event ids kept in the receipts ledger. Compacted on start.
+max_seen = 5000

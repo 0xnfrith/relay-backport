@@ -65,7 +65,7 @@ sequenceDiagram
 <state dir>/                 ~/.local/state/relay-backport (XDG_STATE_HOME honoured) · %LOCALAPPDATA%\relay-backport
   deliveries.jsonl           one MENTION|{json} per delivery + EVENT|session|new|<id> · EVENT|session|cancel|<id> · EVENT|acp|closed
                              0600, directory 0700, every line a single O_APPEND write
-  receipts.seen              event ids already receipted (one hex id per line, 0600); only when receipts are enabled
+  receipts.seen              `pending <id> <author> <channel> <kind>` then `done <id>`; compacted to newest max_seen ids; only when receipts are enabled
   tail.cursor                lines `tail` has already handed over
   sessions/<id>.*.jsonl      per-sink thread-context ledgers
 ```
