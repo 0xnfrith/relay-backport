@@ -2,7 +2,9 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## Unreleased
+## 0.4.0 — 2026-09-20
+
+opt-in delivery receipt, default off
 
 ### Added
 
