@@ -2,6 +2,14 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Delivery receipt** (`[receipt]`, off by default). When a sink accepts a wake, relay-backport can publish a kind:7 reaction on that event, signed by the harness identity, so the author sees the wake was received even while the consumer is still working. Config: `receipt.enabled`, `receipt.reaction` (default `👀`, any emoji or a `:shortcode:`), `receipt.timeout_ms` (default 4000). Env: `RELAY_BACKPORT_RECEIPT_ENABLED`, `_REACTION`, `_TIMEOUT_MS`.
+- At-least-once per event id, persisted in `<state_dir>/receipts.seen` as `pending` then `done`. A pending line is retried once on start; a failed retry becomes `gave_up`. The cap evicts only settled rows, never pending. Newest `receipt.max_seen` settled ids (default 5000). Not published for events no sink accepted, synthetic prompts, events without author and channel, the harness identity's own messages, or when the ledger cannot be written or an existing ledger cannot be read.
+- Publish path: a one-shot NIP-01 websocket to `BUZZ_RELAY_URL` (NIP-42 AUTH if challenged, including a late auth-required OK after EVENT: authenticate and resend once). Failure logs one warning and never fails the delivery. The key is read lazily only for the own-message check on an otherwise eligible delivery, and to sign a publish. Signing uses `nostr-tools`, bundled into the compiled binary.
+
 ## 0.3.3 — 2026-09-17
 
 **A file-sink consumer could not see the thread it was answering in.** The harness builds a thread's history once per session — turn 1's prompt carries a `<thread-context>` block, every later turn is told the context was already delivered — and the `MENTION|` line carried only the mention itself. A consumer woken by turn 2 therefore had the question and no copy of turn 1 anywhere: the same gap `cumulative` mode closed for the webhook sink in 0.3.0/0.3.1, still open for the file one.

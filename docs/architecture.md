@@ -30,6 +30,9 @@ sequenceDiagram
     S->>C: MENTION|json (file → tail) / POST / stdin JSON
     A-->>H: session/update agent_message_chunk "delivered to N sinks"
     A-->>H: {stopReason: end_turn}
+    opt receipt.enabled (off by default)
+      A->>R: kind:7 on the wake (one-shot websocket; never blocks the turn)
+    end
     C-->>R: reply with its own tooling
   end
   opt Stop pressed mid-turn
@@ -52,6 +55,7 @@ sequenceDiagram
 | prompt | `src/prompt.ts` | prompt text → event: `_meta.buzz.events[]`, the `<buzz-event>` text framing, or a synthetic event |
 | delivery | `src/delivery.ts` | the record sinks receive; the `MENTION\|` line (v0.1 shape); the webhook/exec JSON payload |
 | sinks | `src/sinks/{file,webhook,exec}.ts` | append to the delivery file (+ `EVENT\|` lines); JSON POST with retry; one process per delivery with a minimal environment |
+| receipt | `src/receipt.ts` | optional kind:7 on a wake a sink accepted; one-shot NIP-01 publish; once-only ledger |
 | tail | `src/tail.ts` | `tail -F` for the delivery file: follows appends, truncation, rotation, late creation |
 | log | `src/log.ts` | stderr logger with secret redaction |
 
@@ -61,6 +65,9 @@ sequenceDiagram
 <state dir>/                 ~/.local/state/relay-backport (XDG_STATE_HOME honoured) · %LOCALAPPDATA%\relay-backport
   deliveries.jsonl           one MENTION|{json} per delivery + EVENT|session|new|<id> · EVENT|session|cancel|<id> · EVENT|acp|closed
                              0600, directory 0700, every line a single O_APPEND write
+  receipts.seen              `pending <id> <author> <channel> <kind>` then `done <id>` (or `gave_up <id>` after a failed startup retry); cap evicts only settled rows; only when receipts are enabled
+  tail.cursor                lines `tail` has already handed over
+  sessions/<id>.*.jsonl      per-sink thread-context ledgers
 ```
 
-There is no other state: no key, no allowlist, no cursor — the harness owns the relay side.
+The harness still owns the long-lived relay socket and the key. Receipts borrow the injected key for a one-shot publish and do not keep it on disk.

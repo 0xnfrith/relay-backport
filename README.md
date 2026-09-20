@@ -276,10 +276,10 @@ The same JSON as the webhook payload is written to the command's stdin — inclu
 
 1. **Speaks ACP as the agent.** `initialize` (protocol version echoed up to 2, no auth methods, text prompts only), `authenticate`, `session/new` (a session id; the harness's `cwd` and `_meta.sessionTitle` are noted; `systemPrompt` / `_meta.systemPrompt.append` — whichever the client sends — is kept in full and forwarded to the sinks, never logged beyond its character count), `session/prompt`, `session/cancel`. Unknown methods get JSON-RPC `-32601`; an unknown session `-32602`; a bad line `-32700`. stdout carries nothing but the JSON-RPC stream.
 2. **Resolves the event behind each prompt.** From `_meta.buzz.events[]` when the harness attaches it — **not yet live upstream**: today's `buzz-acp` sends only `{ sessionId, prompt }`, so every prompt currently takes the text path; the structured path is implemented ahead of the shape in flight upstream (the last event routes). The text path reads the harness's framing — the `<buzz-event>` block with its `Event ID:`, `Channel:`, `Kind:`, `From: … (hex: …)`, `Time:`, `Content:`, `Tags:` lines, or the routing event of a `<buzz-events>` batch — from the outermost block span, header fields before `Content:` and tags after it, so a message body containing a forged `</buzz-event><buzz-event>…` sequence or a forged batch separator stays inside `content` and cannot replace the id, sender, channel or tags (a batch whose separators do not match its `count` routes on its first event). Otherwise a synthetic event: a stable sha256 id, sender unknown, the raw prompt as content. The prompt itself always travels whole.
-3. **Delivers** to every configured sink at once and waits up to `delivery_wait_ms` (default 15 s); then streams one `session/update` `agent_message_chunk` — "delivered to N sinks", or honestly "N of M (K failed)" / "still in flight" — and ends the turn with `stopReason: end_turn`. A `session/cancel` during the wait ends it with `cancelled`. It never blocks on a human and never publishes on the relay.
+3. **Delivers** to every configured sink at once and waits up to `delivery_wait_ms` (default 15 s); then streams one `session/update` `agent_message_chunk` — "delivered to N sinks", or honestly "N of M (K failed)" / "still in flight" — and ends the turn with `stopReason: end_turn`. A `session/cancel` during the wait ends it with `cancelled`. It never blocks on a human. It does not publish a reply — the consumer answers on the relay with its own tooling. When `[receipt] enabled = true`, a kind:7 reaction is published on the wake after a sink accepted it (see below); that publish never delays or fails the turn.
 4. **Records the session lifecycle** in the file sink so a follower can see sessions come and go, and exits 0 when the harness closes its stdin.
 
-What the harness guarantees, and what it does not. The harness gates **who may trigger** a turn (its "who can send instructions" rule), deduplicates, and resolves session scope and thread context — none of that is repeated here. But until `_meta.buzz.events[]` ships, the `author`, `channel`, `event_id`, `text` and `tags` in a delivery are **parsed from prompt text**, not signed data: they are trustworthy as routing hints from a harness you run, not as an authenticity guarantee about the message. A hook that replies through the `buzz` CLI should anchor to the thread it was mentioned in — reply to the event it was woken for — rather than trust a `Channel:` field blindly, and should treat `text` as untrusted input like any other chat message. Not needed here: a relay URL, a key, a state file beyond the delivery log.
+What the harness guarantees, and what it does not. The harness gates **who may trigger** a turn (its "who can send instructions" rule), deduplicates, and resolves session scope and thread context — none of that is repeated here. But until `_meta.buzz.events[]` ships, the `author`, `channel`, `event_id`, `text` and `tags` in a delivery are **parsed from prompt text**, not signed data: they are trustworthy as routing hints from a harness you run, not as an authenticity guarantee about the message. A hook that replies through the `buzz` CLI should anchor to the thread it was mentioned in — reply to the event it was woken for — rather than trust a `Channel:` field blindly, and should treat `text` as untrusted input like any other chat message. A relay URL and a key are needed only when receipts are enabled; otherwise this process still does not dial the relay.
 
 ## What the consumer receives
 
@@ -343,6 +343,10 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `sinks` | `RELAY_BACKPORT_SINKS` | `file` | `file`, `webhook`, `exec` — several at once |
 | `delivery_wait_ms` | `RELAY_BACKPORT_DELIVERY_WAIT_MS` | `15000` | How long a turn waits for the sinks before ending anyway |
 | `log_format` | `RELAY_BACKPORT_LOG_FORMAT` | `text` | `text` or `json`, on stderr |
+| `receipt.enabled` | `RELAY_BACKPORT_RECEIPT_ENABLED` | `false` | Publish a kind:7 reaction on a wake that a sink accepted. Off by default |
+| `receipt.reaction` | `RELAY_BACKPORT_RECEIPT_REACTION` | `👀` | Unicode emoji, or a custom-emoji shortcode (`:eyes:`) |
+| `receipt.timeout_ms` | `RELAY_BACKPORT_RECEIPT_TIMEOUT_MS` | `4000` | Bound on the one-shot publish (connect + AUTH + EVENT). A timeout is a warning; delivery still succeeded |
+| `receipt.max_seen` | `RELAY_BACKPORT_RECEIPT_MAX_SEEN` | `5000` | Newest settled (done/gave_up) ids kept in the receipts ledger; pending is never evicted by the cap |
 | `tail` cursor | *(CLI only: `--cursor`)* | `<state_dir>/tail.cursor` | Lines `tail` has already delivered; `--no-cursor` turns it off |
 | `file.path` | `RELAY_BACKPORT_FILE` | `<state_dir>/deliveries.jsonl` | The file the `file` sink appends to and `tail` follows |
 | `file.system_prompt` | `RELAY_BACKPORT_FILE_SYSTEM_PROMPT` | `true` | Write the session's system prompt to `<state_dir>/sessions/<id>.system-prompt.md` once, and name it in the `EVENT|session|new|…` line |
@@ -362,7 +366,7 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `exec.pass_buzz_env` | `RELAY_BACKPORT_EXEC_PASS_BUZZ_ENV` | `false` | Hand the harness-injected `BUZZ_*` identity to the hook |
 | `exec.include_system_prompt` | `RELAY_BACKPORT_EXEC_INCLUDE_SYSTEM_PROMPT` | `false` | Attach the session's system prompt (verbatim) to the stdin JSON |
 
-Buzz's own variables (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, …) are not configuration for relay-backport: `BUZZ_RELAY_URL` is copied into payloads as `relay`, the key and any API token are registered with the log redactor at startup, and none of them is read otherwise.
+Buzz's own variables (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, …) are not sink configuration: `BUZZ_RELAY_URL` is copied into payloads as `relay` and, when receipts are on, is the publish target; the key is registered with the log redactor at startup and is read only to sign a receipt. An API token is never read.
 
 CLI: `relay-backport run [--config PATH] [--dry-run] [--observe]` · `relay-backport [acp] [--config PATH] [--sink NAME]… [--file PATH] [--state-dir PATH] [--log-format FMT] [--verbose]` · `relay-backport tail [--file PATH] [--cursor PATH | --no-cursor] [--lines N] [--no-follow] [--config PATH]` · `relay-backport observe [--port N] [--buffer N] [--bind ADDR]` · `--help` · `--version`. Exit codes: `0` ok, `1` configuration or usage.
 
@@ -371,6 +375,19 @@ CLI: `relay-backport run [--config PATH] [--dry-run] [--observe]` · `relay-back
 - **`file`** — one `MENTION|{json}` line per delivery (with the session's `thread_context` on it unless `file.thread_context = "none"`) plus `EVENT|…` lifecycle lines, each a single append to a 0600 file whose directory is created on demand; `relay-backport tail` is its reader. The v0.1 stdout contract, moved to a file because stdout now belongs to ACP. On `session/new` it also (optionally) writes the system prompt to a sibling file and, when configured, the harness's `BUZZ_*` identity to a `.env`-shaped file — both 0600, both atomic writes.
 - **`webhook`** — JSON POST with retry/backoff; optional bearer from a file; the session's system prompt rides along by default.
 - **`exec`** — one process per delivery, JSON on stdin, concurrency 1, timeout, minimal environment (opt-in `BUZZ_*` passthrough, opt-in system prompt).
+
+### Delivery receipt
+
+Off by default. When `receipt.enabled` is on, a wake that a sink actually accepted gets one kind:7 reaction on the original event, signed by the harness identity (`BUZZ_PRIVATE_KEY`), published to `BUZZ_RELAY_URL`. The author of the wake can see that the harness received it even while the consumer behind the sinks is still working. There is no model in this path.
+
+- **At-least-once per event id.** `<state_dir>/receipts.seen` records `pending <id> …` before the publish and `done <id>` after the relay's OK. A pending line is retried once on start; if that retry fails it is written `gave_up` (counts as done from then on). The cap evicts only done/gave_up rows, never pending. If the ledger cannot be written, or an existing ledger cannot be read (anything other than a missing file), receipts switch off for the process, the file is not rewritten, and nothing is published unrecorded. Compacted to the newest `receipt.max_seen` settled ids (default 5000).
+- **Not on filtered events.** If every sink failed (or the turn timed out / was cancelled before a sink accepted), nothing is published.
+- **Not on synthetic prompts.** A plain ACP prompt with no real relay event (no author, no channel) does not get a receipt.
+- **Not on the harness's own messages.** The event author is compared to the pubkey of `BUZZ_PRIVATE_KEY`.
+- **Never fatal.** A failed or timed-out publish logs one warning; the turn already ended.
+- **How it publishes.** This process has no long-lived relay socket — the harness owns that. The receipt opens a one-shot NIP-01 websocket to the same URL, answers NIP-42 AUTH if the relay challenges (including a late `auth-required` OK after EVENT: authenticate and resend once), waits for `OK`, and closes. The harness key is not parsed when receipts are off. When they are on, it is read lazily only for the own-message check on a delivery that already passed every other guard (delivered, real event, author and channel, not already seen), and again to sign a publish (including a pending retry on start). A synthetic, undelivered or unscoped delivery does not read it.
+
+The reaction tags the delivered event (`e`), its author (`p`), the channel (`h`), and the original kind (`k`). Content is `receipt.reaction`. No author or no channel means no receipt.
 
 ## Architecture
 
@@ -421,11 +438,11 @@ v0.2 therefore keeps only what `buzz-acp` does not do — delivery to tools that
 
 ## Security notes
 
-- Buzz's injected key and any API token are registered with the log redactor at startup and never read; the exec hook does not see them unless `exec.pass_buzz_env` says so. A webhook bearer is masked the same way.
+- Buzz's injected key and any API token are registered with the log redactor at startup. When receipts are off the key is not parsed or held. When they are on it is read lazily only for the own-message check on an otherwise eligible delivery, and to sign a publish (including a pending retry on start). The exec hook does not see the key unless `exec.pass_buzz_env` says so. A webhook bearer is masked the same way.
 - **`file.buzz_env_file` writes the agent's own private key to disk in plaintext** (`BUZZ_PRIVATE_KEY`, alongside `BUZZ_RELAY_URL` and `BUZZ_AUTH_TAG`). It exists so a terminal session with no other way to reach the harness's environment can `source` it and act as the agent through the `buzz` CLI — treat that file exactly like a private key file (mode 0600 where the platform honours file modes — not on Windows; keep its directory out of backups and screen shares). Off by default; turn it on only for a consumer that needs to *act* as the agent, not merely read its mentions.
 - The system prompt, wherever it lands (the sibling file, a webhook body, an exec hook's stdin), is Buzz's own conventions text — not a secret, but treat a file holding it like the delivery log: it can contain the agent's persona and team instructions.
 - `relay-backport observe` is the one command that listens on a socket: loopback by default, no authentication, no persistence, and it holds full prompt text in memory. Do not `--bind` it to a routable address, and close the page when you are done — anyone who can reach that port can read every prompt the agent received. It is never part of the `acp` path: the harness never starts it, and nothing breaks when it is not running.
-- relay-backport opens no network socket of its own and never publishes on the relay. Its only outputs are the sinks and the JSON-RPC stream on stdout.
+- relay-backport opens no network socket of its own **unless receipts are enabled**. With `receipt.enabled = false` (the default) its only outputs are the sinks and the JSON-RPC stream on stdout. With receipts on it opens a short-lived websocket to `BUZZ_RELAY_URL`, signs a kind:7 with the harness-injected key, and closes. The key is still never logged.
 - The delivery file is 0600 in a 0700 directory. It holds message content; treat it like a log.
 - Delivery is at-least-once (the harness may re-prompt after a cancel or a restart). Receivers must be idempotent on `event_id`.
 
@@ -439,7 +456,7 @@ bun run build            # dist/relay-backport-{linux-x64,darwin-arm64,windows-x
 RELAY_BACKPORT_BIN=$PWD/dist/relay-backport-darwin-arm64 bun test test/binary.test.ts
 ```
 
-Layout: `src/cli.ts` · `src/config.ts` · `src/acp-server.ts` (JSON-RPC server) · `src/prompt.ts` (prompt → event) · `src/delivery.ts` (record, `MENTION|` line, payload) · `src/sinks/{file,webhook,exec}.ts` · `src/tail.ts` (follower + line cursor) · `src/run.ts` (the launcher) · `src/thread-context.ts` (the cumulative ledger) · `src/observe.ts` (the loopback page) · `src/log.ts` · `test/` · `deploy/` · `docs/` · `.github/workflows/` · `CHANGELOG.md`.
+Layout: `src/cli.ts` · `src/config.ts` · `src/acp-server.ts` (JSON-RPC server) · `src/prompt.ts` (prompt → event) · `src/delivery.ts` (record, `MENTION|` line, payload) · `src/sinks/{file,webhook,exec}.ts` · `src/receipt.ts` (optional kind:7 delivery receipt) · `src/tail.ts` (follower + line cursor) · `src/run.ts` (the launcher) · `src/thread-context.ts` (the cumulative ledger) · `src/observe.ts` (the loopback page) · `src/log.ts` · `test/` · `deploy/` · `docs/` · `.github/workflows/` · `CHANGELOG.md`.
 
 ## License
 
