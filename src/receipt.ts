@@ -353,8 +353,10 @@ export async function publishToRelay(opts: {
           finish({ ok: true, id: signed.id, message: "" });
           return;
         }
-        if (isAuthRequired(message) && eventSends < 2) {
-          if (challenge) sendAuth(challenge);
+        if (isAuthRequired(message)) {
+          // Both EVENT attempts share this id. A late auth-required OK for
+          // attempt one must not settle as failure once attempt two is out.
+          if (eventSends < 2 && challenge) sendAuth(challenge);
           return;
         }
         finish({ ok: false, id: signed.id, message: message || "rejected" });

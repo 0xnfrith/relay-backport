@@ -479,6 +479,52 @@ describe("publishToRelay", () => {
     expect(relay.published[0]!.tags).toContainEqual(["h", CHANNEL]);
   });
 
+  test("a delayed auth-required OK for attempt one is ignored once attempt two is in flight", async () => {
+    const relay = new MockRelay({ delayedAuthReject: true });
+    cleanups.push(() => relay.stop());
+    const sk = generateSecretKey();
+    const result = await publishToRelay({
+      url: relay.url,
+      secretKey: sk,
+      template: buildReactionTemplate({ eventId: EVENT, reaction: "👀", author: SENDER, channel: CHANNEL, kind: 9 }),
+      timeoutMs: 2000,
+    });
+    expect(result.ok).toBe(true);
+    expect(relay.eventAttempts.length).toBe(2);
+    expect(relay.published).toHaveLength(1);
+  });
+
+  test("delayed auth-required after resend still records done; a restart publishes nothing", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const relay = new MockRelay({ delayedAuthReject: true });
+    cleanups.push(() => relay.stop());
+    const sk = generateSecretKey();
+    const r = new Receipts({
+      enabled: true,
+      reaction: "👀",
+      timeoutMs: 2000,
+      stateDir: t.dir,
+      relayUrl: relay.url,
+      secret: bytesToHex(sk),
+    });
+    await r.afterDelivery(delivery(), true);
+    expect(relay.published).toHaveLength(1);
+    expect((await loadLedger(seenPath(t.dir), 5000)).get(EVENT)).toEqual({ state: "done" });
+
+    const restarted = new Receipts({
+      enabled: true,
+      reaction: "👀",
+      timeoutMs: 2000,
+      stateDir: t.dir,
+      relayUrl: relay.url,
+      secret: bytesToHex(sk),
+    });
+    await restarted.ready;
+    await restarted.afterDelivery(delivery(), true);
+    expect(relay.published).toHaveLength(1);
+  });
+
   test("a late AUTH challenge after EVENT resends once and lands", async () => {
     const relay = new MockRelay({ lateAuth: true });
     cleanups.push(() => relay.stop());

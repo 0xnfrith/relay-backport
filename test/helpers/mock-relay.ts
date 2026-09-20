@@ -7,6 +7,11 @@ export type MockRelayOptions = {
   requireAuth?: boolean;
   /** Reject the first EVENT with auth-required and send the AUTH challenge then; accept after AUTH. */
   lateAuth?: boolean;
+  /**
+   * Challenge on the first EVENT without an OK, then after AUTH and the resend
+   * emit a delayed auth-required OK for that same event id before accepting.
+   */
+  delayedAuthReject?: boolean;
   rejectPublish?: string;
 };
 
@@ -54,6 +59,23 @@ export class MockRelay {
           if (msg[0] === "EVENT") {
             const ev = msg[1] as Event;
             self.eventAttempts.push(ev);
+            if (self.opts.delayedAuthReject && !conn.authed) {
+              if (!conn.challenge) {
+                conn.challenge = `challenge-${++self.seq}`;
+                ws.send(JSON.stringify(["AUTH", conn.challenge]));
+              }
+              return;
+            }
+            if (self.opts.delayedAuthReject && conn.authed) {
+              ws.send(JSON.stringify(["OK", ev.id, false, "auth-required: authenticate first"]));
+              if (!verifyEvent(ev)) {
+                ws.send(JSON.stringify(["OK", ev.id, false, "invalid: bad signature"]));
+                return;
+              }
+              self.published.push(ev);
+              ws.send(JSON.stringify(["OK", ev.id, true, ""]));
+              return;
+            }
             if ((self.opts.requireAuth || self.opts.lateAuth) && !conn.authed) {
               if (self.opts.lateAuth && !conn.challenge) {
                 conn.challenge = `challenge-${++self.seq}`;
