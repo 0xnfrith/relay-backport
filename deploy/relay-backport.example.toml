@@ -51,3 +51,13 @@ pass_buzz_env = false
 # Attach the session's system prompt (verbatim) to the stdin JSON. Off by
 # default: an exec hook is usually short-lived and does not need it repeated.
 include_system_prompt = false
+
+# Kind:7 reaction on a wake that was actually written to a sink, signed by
+# the harness identity. Off by default. Failure is a warning; delivery
+# still succeeds. Uses BUZZ_RELAY_URL + BUZZ_PRIVATE_KEY (injected by the
+# harness) to publish a one-shot NIP-01 EVENT, with NIP-42 AUTH if asked.
+[receipt]
+enabled = false
+reaction = "👀"
+# Any unicode emoji, or a custom-emoji shortcode such as ":eyes:".
+timeout_ms = 4000

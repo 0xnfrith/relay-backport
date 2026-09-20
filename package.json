@@ -24,5 +24,8 @@
     "build:darwin": "bun build --compile --target=bun-darwin-arm64 src/cli.ts --outfile dist/relay-backport-darwin-arm64",
     "build:windows": "bun build --compile --target=bun-windows-x64 src/cli.ts --outfile dist/relay-backport-windows-x64.exe"
   },
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "nostr-tools": "^2.25.1"
+  }
 }

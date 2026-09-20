@@ -5,7 +5,7 @@
 // `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, … — so every variable of ours is
 // prefixed `RELAY_BACKPORT_` and can never collide with Buzz's. Anything that
 // looks like a Buzz secret is registered with the log redactor here, before
-// anything else can print it, and is otherwise never read.
+// anything else can print it. The key is read only when receipts are enabled.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -23,6 +23,10 @@ export const DEFAULT_WEBHOOK_TIMEOUT_MS = 8000;
 export const DEFAULT_WEBHOOK_ATTEMPTS = 3;
 export const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 export const DEFAULT_DELIVERY_WAIT_MS = 15_000;
+export const DEFAULT_RECEIPT_ENABLED = false;
+export const DEFAULT_RECEIPT_REACTION = "👀";
+export const DEFAULT_RECEIPT_TIMEOUT_MS = 4000;
+export const DEFAULT_RECEIPT_SEEN_NAME = "receipts.seen";
 export const DEFAULT_CUMULATIVE_MAX_CHARS = 32_000;
 export const DEFAULT_FILE_THREAD_CONTEXT: "none" | "new" | "cumulative" = "cumulative";
 export const DEFAULT_FILE_THREAD_CONTEXT_MAX_CHARS = 32_000;
@@ -87,6 +91,18 @@ export type ExecConfig = {
   includeSystemPrompt: boolean;
 };
 
+/**
+ * A kind:7 delivery receipt on the event that caused a wake. Off by default:
+ * publishing is a new behaviour and needs the harness-injected key.
+ */
+export type ReceiptConfig = {
+  enabled: boolean;
+  /** Unicode emoji or a custom-emoji shortcode (`:name:`). */
+  reaction: string;
+  /** Bound on connect + AUTH + publish. A timeout is a warning, never a delivery failure. */
+  timeoutMs: number;
+};
+
 /** `relay-backport run`: what the launcher needs to spawn `buzz-acp`. */
 export type RunConfig = {
   /** The `buzz-acp` binary: a path, or a bare name looked up on PATH. */
@@ -120,6 +136,7 @@ export type Config = {
   file?: FileConfig;
   webhook?: WebhookConfig;
   exec?: ExecConfig;
+  receipt: ReceiptConfig;
   run: RunConfig;
   /** Where the config file came from, for logs. */
   configPath?: string;
@@ -149,6 +166,7 @@ export type RawConfig = {
     cumulative_max_chars?: number | string;
   };
   exec?: { command?: string[] | string; timeout_ms?: number | string; pass_buzz_env?: boolean | string; include_system_prompt?: boolean | string };
+  receipt?: { enabled?: boolean | string; reaction?: string; timeout_ms?: number | string };
   run?: {
     buzz_acp?: string;
     key_file?: string;
@@ -256,6 +274,15 @@ export function rawFromEnv(env: EnvMap): RawConfig {
     if (passBuzz) raw.exec.pass_buzz_env = passBuzz;
     if (execIncludeSystemPrompt !== undefined) raw.exec.include_system_prompt = execIncludeSystemPrompt;
   }
+  const receiptEnabled = get("RECEIPT_ENABLED");
+  const receiptReaction = get("RECEIPT_REACTION");
+  const receiptTimeout = get("RECEIPT_TIMEOUT_MS");
+  if (receiptEnabled !== undefined || receiptReaction || receiptTimeout) {
+    raw.receipt = {};
+    if (receiptEnabled !== undefined) raw.receipt.enabled = receiptEnabled;
+    if (receiptReaction) raw.receipt.reaction = receiptReaction;
+    if (receiptTimeout) raw.receipt.timeout_ms = receiptTimeout;
+  }
   const run: NonNullable<RawConfig["run"]> = {};
   const runGet = (name: string, key: keyof NonNullable<RawConfig["run"]>) => {
     const v = get(`RUN_${name}`);
@@ -281,6 +308,7 @@ function mergeRaw(base: RawConfig, over: RawConfig): RawConfig {
   if (base.file || over.file) out.file = { ...(base.file ?? {}), ...(over.file ?? {}) };
   if (base.webhook || over.webhook) out.webhook = { ...(base.webhook ?? {}), ...(over.webhook ?? {}) };
   if (base.exec || over.exec) out.exec = { ...(base.exec ?? {}), ...(over.exec ?? {}) };
+  if (base.receipt || over.receipt) out.receipt = { ...(base.receipt ?? {}), ...(over.receipt ?? {}) };
   if (base.run || over.run) out.run = { ...(base.run ?? {}), ...(over.run ?? {}) };
   return out;
 }
@@ -431,6 +459,14 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     };
   }
 
+  const reaction = (raw.receipt?.reaction ?? DEFAULT_RECEIPT_REACTION).trim();
+  if (!reaction) throw new ConfigError("receipt.reaction must be a non-empty emoji or shortcode");
+  const receipt: ReceiptConfig = {
+    enabled: toBool(raw.receipt?.enabled, DEFAULT_RECEIPT_ENABLED, "receipt.enabled"),
+    reaction,
+    timeoutMs: toInt(raw.receipt?.timeout_ms, DEFAULT_RECEIPT_TIMEOUT_MS, "receipt.timeout_ms", 1),
+  };
+
   const runRaw = raw.run ?? {};
   const run: RunConfig = {
     // BUZZ_ACP_BIN is Buzz's own variable name, so it is read unprefixed —
@@ -458,6 +494,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     file,
     webhook,
     exec,
+    receipt,
     run,
     configPath,
   };
@@ -490,6 +527,7 @@ export function describeConfig(cfg: Config): Record<string, unknown> {
         }
       : null,
     exec: cfg.exec ? { command: cfg.exec.command, timeout_ms: cfg.exec.timeoutMs, pass_buzz_env: cfg.exec.passBuzzEnv, include_system_prompt: cfg.exec.includeSystemPrompt } : null,
+    receipt: { enabled: cfg.receipt.enabled, reaction: cfg.receipt.reaction, timeout_ms: cfg.receipt.timeoutMs },
     run: { buzz_acp: cfg.run.buzzAcp, key_file: cfg.run.keyFile || null, session_title: cfg.run.sessionTitle, allowlist: cfg.run.allowlist.length, allowlist_file: cfg.run.allowlistFile ?? null },
     config: cfg.configPath ?? null,
   };

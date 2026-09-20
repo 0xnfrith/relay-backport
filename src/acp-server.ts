@@ -10,7 +10,8 @@
 // forwarded, whole, to the configured sinks, one `agent_message_chunk`
 // acknowledges delivery, and the turn ends. We never wait for a human and
 // never publish a reply — the consumer answers on the relay with its own
-// tooling.
+// tooling. An optional delivery receipt (kind:7) is the only publish, and
+// it never blocks this turn.
 //
 // stdout is the JSON-RPC stream, so nothing else may ever be written to it;
 // logs go to stderr, deliveries go to the sinks.
@@ -18,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { rootIdOf, threadRoot, type Delivery } from "./delivery";
 import { log, errMessage } from "./log";
 import { promptText, resolveEvent } from "./prompt";
+import type { Receipts } from "./receipt";
 import type { Sink } from "./sinks/index";
 import { NAME, VERSION } from "./version";
 
@@ -66,6 +68,8 @@ export type AcpServerOptions = {
   input: AsyncIterable<string>;
   relayUrl: string;
   deliveryWaitMs: number;
+  /** Optional kind:7 receipt after a sink actually accepted the delivery. */
+  receipts?: Receipts;
 };
 
 export type AcpServerHandle = {
@@ -199,6 +203,14 @@ export function startAcpServer(opts: AcpServerOptions): AcpServerHandle {
     });
     reply(id, { stopReason: outcome === "cancelled" ? "cancelled" : "end_turn" });
     log.info("acp turn ended", { session: session.id, event: delivery.event.id, outcome, message });
+
+    // Receipt is after the turn ends and only when a sink accepted the write.
+    // It is folded into inFlight so stdin-close waits for it, but a failure
+    // cannot change the acknowledgement already sent.
+    if (opts.receipts && outcome === "done" && settled.some(Boolean)) {
+      const rec = opts.receipts.afterDelivery(delivery, true);
+      inFlight = inFlight.then(() => rec);
+    }
   }
 
   function onSessionCancel(params: unknown): void {

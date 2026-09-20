@@ -13,6 +13,7 @@ import { lines, startAcpServer } from "./acp-server";
 import { ConfigError, DEFAULT_TAIL_CURSOR_NAME, describeConfig, loadConfig, type RawConfig } from "./config";
 import { configureLog, log, errMessage } from "./log";
 import { DEFAULT_BIND, DEFAULT_BUFFER, DEFAULT_PORT, startObserveServer } from "./observe";
+import { Receipts } from "./receipt";
 import { buildSinks } from "./sinks/index";
 import { buildPlan, pgrepSessionTitle, preflight, probeUrl, renderPlan, runHarness } from "./run";
 import { stripThreadContext, tailFile } from "./tail";
@@ -217,12 +218,21 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
         configureLog({ format: cfg.logFormat, level: args.flags.verbose === true ? "debug" : "info" });
         log.info("starting acp server", { version: VERSION, ...describeConfig(cfg) });
         const sinks = buildSinks(cfg, { env: io.env });
+        const receipts = new Receipts({
+          enabled: cfg.receipt.enabled,
+          reaction: cfg.receipt.reaction,
+          timeoutMs: cfg.receipt.timeoutMs,
+          stateDir: cfg.stateDir,
+          relayUrl: cfg.relayUrl,
+          secret: io.env.BUZZ_PRIVATE_KEY,
+        });
         const server = startAcpServer({
           sinks,
           write: (line) => io.out(line),
           input: lines(io.stdin ?? Bun.stdin.stream()),
           relayUrl: cfg.relayUrl,
           deliveryWaitMs: cfg.deliveryWaitMs,
+          receipts,
         });
         const onSignal = () => {
           log.info("signal received, stopping acp server");
