@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { generateSecretKey, getPublicKey } from "nostr-tools";
 import type { Delivery } from "../src/delivery";
@@ -142,7 +142,7 @@ describe("seen ledger", () => {
     expect(legacy.get("d".repeat(64))).toEqual({ state: "done" });
   });
 
-  test("compact keeps only the newest N ids", async () => {
+  test("compact evicts only settled rows; pending is kept even over maxSeen", async () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);
     const path = seenPath(t.dir);
@@ -150,6 +150,14 @@ describe("seen ledger", () => {
     writeFileSync(path, ids.map((id) => formatLedgerLine(id, { state: "done" })).join("\n") + "\n");
     const loaded = await loadLedger(path, 2);
     expect([...loaded.keys()]).toEqual(["2".repeat(64), "3".repeat(64)]);
+
+    const pending = new Map(
+      ids.map((id) => [id, { state: "pending" as const, author: SENDER, channel: CHANNEL, kind: 9 }]),
+    );
+    writeLedger(path, pending);
+    const kept = await loadLedger(path, 2);
+    expect(kept.size).toBe(3);
+    for (const id of ids) expect(kept.get(id)?.state).toBe("pending");
   });
 });
 
@@ -244,6 +252,102 @@ describe("Receipts", () => {
     await r.afterDelivery(delivery({ source: "synthetic", event: { pubkey: "", tags: [] }, channel: "" }), true);
     expect(calls).toBe(0);
     expect(existsSync(seenPath(t.dir))).toBe(false);
+  });
+
+  test("synthetic, undelivered and unscoped deliveries read the key zero times", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    let reads = 0;
+    const hex = bytesToHex(generateSecretKey());
+    const r = new Receipts({
+      enabled: true,
+      reaction: "👀",
+      timeoutMs: 500,
+      stateDir: t.dir,
+      relayUrl: "ws://127.0.0.1:1",
+      secret: () => {
+        reads++;
+        return hex;
+      },
+      publish: async () => ({ ok: true, id: "x".repeat(64), message: "" }),
+    });
+    await r.ready;
+    expect(reads).toBe(0);
+    await r.afterDelivery(delivery({ source: "synthetic" }), true);
+    await r.afterDelivery(delivery(), false);
+    await r.afterDelivery(delivery({ event: { pubkey: "" }, channel: "" }), true);
+    expect(reads).toBe(0);
+  });
+
+  test("max_seen does not drop pending: three failed publishes all retry after restart", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const ids = ["1".repeat(64), "2".repeat(64), "3".repeat(64)];
+    let calls = 0;
+    const r = new Receipts({
+      enabled: true,
+      reaction: "👀",
+      timeoutMs: 500,
+      maxSeen: 2,
+      stateDir: t.dir,
+      relayUrl: "ws://127.0.0.1:1",
+      secret: bytesToHex(generateSecretKey()),
+      publish: async () => {
+        calls++;
+        return { ok: false, id: "x".repeat(64), message: "relay down" };
+      },
+    });
+    for (const id of ids) await r.afterDelivery(delivery({ event: { id } }), true);
+    expect(calls).toBe(3);
+    const onDisk = await loadLedger(seenPath(t.dir), 2);
+    expect(onDisk.size).toBe(3);
+    for (const id of ids) expect(onDisk.get(id)?.state).toBe("pending");
+
+    const restarted = new Receipts({
+      enabled: true,
+      reaction: "👀",
+      timeoutMs: 500,
+      maxSeen: 2,
+      stateDir: t.dir,
+      relayUrl: "ws://127.0.0.1:1",
+      secret: bytesToHex(generateSecretKey()),
+      publish: async () => {
+        calls++;
+        return { ok: true, id: "y".repeat(64), message: "" };
+      },
+    });
+    await restarted.ready;
+    expect(calls).toBe(6);
+  });
+
+  test("an unreadable ledger is left byte-identical and publishes nothing", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = seenPath(t.dir);
+    writeLedger(path, new Map([[EVENT, { state: "done" }]]));
+    const before = readFileSync(path);
+    chmodSync(path, 0o000);
+    let calls = 0;
+    const warns: string[] = [];
+    configureLog({ writer: (line) => warns.push(line) });
+    const r = new Receipts({
+      enabled: true,
+      reaction: "👀",
+      timeoutMs: 500,
+      stateDir: t.dir,
+      relayUrl: "ws://127.0.0.1:1",
+      secret: bytesToHex(generateSecretKey()),
+      publish: async () => {
+        calls++;
+        return { ok: true, id: "x".repeat(64), message: "" };
+      },
+    });
+    await r.ready;
+    await r.afterDelivery(delivery({ event: { id: "a".repeat(64) } }), true);
+    expect(calls).toBe(0);
+    expect(warns.filter((l) => /receipt/.test(l))).toHaveLength(1);
+    chmodSync(path, 0o600);
+    expect(readFileSync(path).equals(before)).toBe(true);
   });
 
   test("disabled: never parses the key, never publishes, never writes a seen file", async () => {

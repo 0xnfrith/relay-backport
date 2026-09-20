@@ -11,9 +11,10 @@
 //
 // Off by default. At-least-once per event id: `pending <id>` is written
 // before the publish and `done <id>` after the relay's OK. A pending line
-// with no done is retried once on start. The ledger is compacted to the
-// newest `maxSeen` ids (default 5000) so it cannot grow without bound.
-import { createReadStream, existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+// is retried once on start; if that retry fails it becomes `gave_up` (counts
+// as done). The cap evicts only done/gave_up rows — never pending. Compacted
+// to the newest `maxSeen` settled ids (default 5000).
+import { accessSync, constants, createReadStream, existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
 import { finalizeEvent, getPublicKey, nip19 } from "nostr-tools";
@@ -36,7 +37,14 @@ export type PublishResult = { ok: boolean; id: string; message: string };
 
 export type PublishFn = (template: ReactionTemplate, timeoutMs: number) => Promise<PublishResult>;
 
-export type LedgerRecord = { state: "pending"; author: string; channel: string; kind: number } | { state: "done" };
+export type LedgerRecord =
+  | { state: "pending"; author: string; channel: string; kind: number }
+  | { state: "done" }
+  | { state: "gave_up" };
+
+export function isSettled(record: LedgerRecord | undefined): boolean {
+  return record?.state === "done" || record?.state === "gave_up";
+}
 
 export function hexToBytes(hex: string): Uint8Array {
   const h = hex.trim().toLowerCase();
@@ -98,7 +106,8 @@ export function decideReceipt(input: {
   author: string;
   channel: string;
   source: EventSource;
-  ownPubkey: string;
+  /** When omitted, the own-message check is skipped — caller reads the key later. */
+  ownPubkey?: string;
   seen: boolean;
 }): ReceiptDecision {
   if (!input.enabled) return { send: false, reason: "disabled" };
@@ -127,6 +136,8 @@ export function parseLedgerLine(line: string): { id: string; record: LedgerRecor
       record: { state: "pending", author: pending[2].toLowerCase(), channel: pending[3], kind: Number.parseInt(pending[4] ?? "9", 10) },
     };
   }
+  const gaveUp = t.match(/^gave_up\s+([0-9a-f]{64})$/i);
+  if (gaveUp?.[1]) return { id: gaveUp[1].toLowerCase(), record: { state: "gave_up" } };
   const done = t.match(/^done\s+([0-9a-f]{64})$/i);
   if (done?.[1]) return { id: done[1].toLowerCase(), record: { state: "done" } };
   // Legacy one-id-per-line files from the first PR revision.
@@ -135,25 +146,41 @@ export function parseLedgerLine(line: string): { id: string; record: LedgerRecor
 }
 
 export function formatLedgerLine(id: string, record: LedgerRecord): string {
-  if (record.state === "done") return `done ${id}`;
-  return `pending ${id} ${record.author} ${record.channel} ${record.kind}`;
+  if (record.state === "pending") return `pending ${id} ${record.author} ${record.channel} ${record.kind}`;
+  if (record.state === "gave_up") return `gave_up ${id}`;
+  return `done ${id}`;
 }
 
-/** Keep `id` as the newest entry; drop the oldest when over `maxSeen`. Memory is O(maxSeen). */
-export function touchRecord(records: Map<string, LedgerRecord>, id: string, record: LedgerRecord, maxSeen: number): void {
-  if (records.has(id)) records.delete(id);
-  records.set(id, record);
+/** Drop the oldest settled (done/gave_up) rows until size <= maxSeen. Never evicts pending. */
+export function evictSettled(records: Map<string, LedgerRecord>, maxSeen: number): void {
   while (records.size > maxSeen) {
-    const oldest = records.keys().next().value;
-    if (oldest === undefined) break;
-    records.delete(oldest);
+    let evicted = false;
+    for (const [id, rec] of records) {
+      if (rec.state === "pending") continue;
+      records.delete(id);
+      evicted = true;
+      break;
+    }
+    if (!evicted) break;
   }
 }
 
-/** Stream the file so a huge ledger cannot be loaded whole into a Set. */
+/** Keep `id` as the newest entry; drop the oldest settled row when over `maxSeen`. */
+export function touchRecord(records: Map<string, LedgerRecord>, id: string, record: LedgerRecord, maxSeen: number): void {
+  if (records.has(id)) records.delete(id);
+  records.set(id, record);
+  evictSettled(records, maxSeen);
+}
+
+/** Stream the file so a huge ledger cannot be loaded whole into a Set. ENOENT is empty; any other read error throws. */
 export async function loadLedger(path: string, maxSeen: number): Promise<Map<string, LedgerRecord>> {
   const records = new Map<string, LedgerRecord>();
-  if (!existsSync(path)) return records;
+  try {
+    accessSync(path, constants.R_OK);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return records;
+    throw err;
+  }
   const stream = createReadStream(path, { encoding: "utf8" });
   const rl = createInterface({ input: stream, crlfDelay: Infinity });
   try {
@@ -161,8 +188,9 @@ export async function loadLedger(path: string, maxSeen: number): Promise<Map<str
       const parsed = parseLedgerLine(line);
       if (parsed) touchRecord(records, parsed.id, parsed.record, maxSeen);
     }
-  } catch {
-    // a missing or unreadable file is an empty ledger
+  } catch (err) {
+    stream.destroy();
+    throw err;
   } finally {
     rl.close();
     stream.destroy();
@@ -425,7 +453,7 @@ export class Receipts {
     }
     for (const p of pending) {
       if (this.attempted.has(p.id)) continue;
-      const warning = await this.publishRecord(p.id, p.author, p.channel, p.kind);
+      const warning = await this.publishRecord(p.id, p.author, p.channel, p.kind, true);
       if (warning) log.warn(warning);
     }
   }
@@ -440,14 +468,15 @@ export class Receipts {
       author: delivery.event.pubkey,
       channel: delivery.channel,
       source: delivery.source,
-      ownPubkey: this.pubkey,
-      seen: this.attempted.has(eventId) || this.records.get(eventId)?.state === "done",
+      seen: this.attempted.has(eventId) || isSettled(this.records.get(eventId)),
     });
     if (!decision.send) return undefined;
-    return this.publishRecord(eventId, delivery.event.pubkey.toLowerCase(), delivery.channel, delivery.event.kind);
+    const ownPubkey = this.pubkey;
+    if (ownPubkey && delivery.event.pubkey.toLowerCase() === ownPubkey.toLowerCase()) return undefined;
+    return this.publishRecord(eventId, delivery.event.pubkey.toLowerCase(), delivery.channel, delivery.event.kind, false);
   }
 
-  private async publishRecord(eventId: string, author: string, channel: string, kind: number): Promise<string | undefined> {
+  private async publishRecord(eventId: string, author: string, channel: string, kind: number, startupRetry = false): Promise<string | undefined> {
     if (!this.publishFn) {
       if (!this.parseSecret()) return "receipt: no harness key";
       if (!this.relayUrl) return "receipt: no relay";
@@ -465,6 +494,16 @@ export class Receipts {
     const template = buildReactionTemplate({ eventId, reaction: this.reaction, author, channel, kind });
     const result = await this.publish(template, this.timeoutMs);
     if (!result.ok) {
+      if (startupRetry) {
+        touchRecord(this.records, eventId, { state: "gave_up" }, this.maxSeen);
+        try {
+          this.persist(this.records);
+        } catch (err) {
+          this.disablePersist(`receipt: could not record gave_up (${errMessage(err)}); receipts off`);
+          return undefined;
+        }
+        return `receipt: publish failed (${result.message || "error"}); giving up`;
+      }
       return `receipt: publish failed (${result.message || "error"})`;
     }
     touchRecord(this.records, eventId, { state: "done" }, this.maxSeen);
