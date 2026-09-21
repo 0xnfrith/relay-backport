@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { registerSecret, type LogFormat } from "./log";
-import { DEFAULT_VISIBLE_CHARS, VIEW_NAMES, type ViewName } from "./view";
+import { DEFAULT_VISIBLE_CHARS, MIN_VISIBLE_CHARS, TEXT_PREFIX_MAX, VIEW_NAMES, type ViewName } from "./view";
 
 export const SINK_NAMES = ["file", "webhook", "exec"] as const;
 export type SinkName = (typeof SINK_NAMES)[number];
@@ -415,6 +415,17 @@ function parseViewName(v: string | undefined): ViewName {
   throw new ConfigError(`view.name must be one of ${VIEW_NAMES.join(", ")}`);
 }
 
+function parseVisibleChars(v: number | string | undefined): number {
+  if (v === undefined) return DEFAULT_VIEW_VISIBLE_CHARS;
+  const n = toInt(v, DEFAULT_VIEW_VISIBLE_CHARS, "view.visible_chars", 0);
+  if (n < MIN_VISIBLE_CHARS) {
+    throw new ConfigError(
+      `view.visible_chars must be >= ${MIN_VISIBLE_CHARS} (the TEXT line prefix "TEXT | <12 hex> | " is ${TEXT_PREFIX_MAX} characters; the rest is body)`,
+    );
+  }
+  return n;
+}
+
 function parseStringMap(v: Record<string, string> | undefined): Record<string, string> {
   if (!v || typeof v !== "object" || Array.isArray(v)) return {};
   const out: Record<string, string> = {};
@@ -563,7 +574,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
 
   const view: ViewConfig = {
     name: parseViewName(raw.view?.name),
-    visibleChars: toInt(raw.view?.visible_chars, DEFAULT_VIEW_VISIBLE_CHARS, "view.visible_chars", 1),
+    visibleChars: parseVisibleChars(raw.view?.visible_chars),
     hide: (toList(raw.view?.hide) ?? []).map((s) => s.toLowerCase()),
   };
 

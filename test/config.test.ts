@@ -278,13 +278,19 @@ hide = ["aa", "bb"]
         RELAY_BACKPORT_FILE_PROMPT_FIELDS: "true",
         RELAY_BACKPORT_VIEW: "claude-code",
         RELAY_BACKPORT_VIEW_VISIBLE_CHARS: "320",
-        RELAY_BACKPORT_VIEW_HIDE: "c371,5221",
+        RELAY_BACKPORT_VIEW_HIDE: "aa,bb",
       },
       readFile,
     });
     expect(fromEnv.file?.promptFields).toBe(true);
-    expect(fromEnv.view).toEqual({ name: "claude-code", visibleChars: 320, hide: ["c371", "5221"] });
+    expect(fromEnv.view).toEqual({ name: "claude-code", visibleChars: 320, hide: ["aa", "bb"] });
     expect(() => loadConfig({ env: { HOME: "/home/u", RELAY_BACKPORT_VIEW: "webhook" }, readFile })).toThrow(/view.name/);
     expect(() => loadConfig({ env: { HOME: "/home/u", RELAY_BACKPORT_VIEW_VISIBLE_CHARS: "0" }, readFile })).toThrow(/view.visible_chars/);
+    for (const n of ["1", "21", "31"]) {
+      expect(() => loadConfig({ env: { HOME: "/home/u", RELAY_BACKPORT_VIEW_VISIBLE_CHARS: n }, readFile })).toThrow(
+        /view.visible_chars must be >= 32.*TEXT \| <12 hex>/,
+      );
+    }
+    expect(loadConfig({ env: { HOME: "/home/u", RELAY_BACKPORT_VIEW_VISIBLE_CHARS: "32" }, readFile }).view.visibleChars).toBe(32);
   });
 });

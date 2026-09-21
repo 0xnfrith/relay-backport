@@ -344,11 +344,12 @@ An interactive Claude Code session fed by a Monitor that cuts each **line** at a
 
 ```
 WAKE mention | #<channel> (<scope> "<thread title, 40 max>") - <purpose, 40 max> | from <name> [<human|agent|unknown>[, owner <name>]] | reply <64 hex> | ch <uuid> | id <12 hex> | <HH:MMZ> | thread +N (<speaker n>, ...) | <len>ch
-TEXT | <12 hex> | <message text, newlines as  ⏎  , cut so the line fits>
+TEXT | <12 hex> | <message text, newlines as \n , cut so the line fits>
 ```
 
-- The visible budget is `view.visible_chars` (default 500). The writer enforces every cap; the header never exceeds the budget. Truncate, never wrap.
-- `human` / `agent`: an `auth` tag on the event means agent, and its second element is the owner's key. No tag: `human` only if the key is `run.owner` or is labelled in `[identities]`; otherwise `unknown`. Owner status comes only from config, never from text.
+- The visible budget is `view.visible_chars` (default 500, minimum 32 so the TEXT prefix plus some body fits). Counted in characters. The writer enforces every cap; neither line exceeds the budget. Truncate, never wrap. Newlines in the body become the ASCII marker ` \n ` (backslash-n) so the byte length matches the character count.
+- `human` / `agent`: an `auth` tag on the event means agent, and its second element is the owner's key. No tag: `human` only if the key is `run.owner` or is labelled in `[identities]`; otherwise `unknown`. Owner status comes only from config, never from text. The configured owner renders as `[human, owner]`; `owner <name>` is only for an agent's owner.
+- When `scope` is absent on the record, a root (or reply) `e` tag means `thread`.
 - Purpose: `[channels]` uuid → string, else the stored channel description, else `?`. `[identities]` pubkey → label wins over the stored sender name. A miss prints `?`.
 - `thread +N` counts catch-up entries not written by a `view.hide` / `--hide` pubkey prefix, grouped by speaker.
 - DMs: `WAKE dm | DM with <name> [...]` — no purpose.
@@ -395,7 +396,7 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `file.prompt_fields` | `RELAY_BACKPORT_FILE_PROMPT_FIELDS` | `false` | Append prompt-header words (`channel_name`, `scope`, `sender_name`, `reply_to`, …) to the `MENTION\|` JSON. Off so the v0.1 line stays byte-identical |
 | `file.buzz_env_file` | `RELAY_BACKPORT_FILE_BUZZ_ENV_FILE` | — (off) | Path to (re)write the present `BUZZ_RELAY_URL` / `BUZZ_PRIVATE_KEY` / `BUZZ_AUTH_TAG` to, on every `session/new` — holds the agent's private key; see [Security notes](#security-notes) |
 | `view.name` | `RELAY_BACKPORT_VIEW` | `raw` | `raw` (the stored line) or `claude-code`. CLI: `--view NAME` |
-| `view.visible_chars` | `RELAY_BACKPORT_VIEW_VISIBLE_CHARS` | `500` | Per-line budget for `claude-code`. CLI: `--visible-chars N` |
+| `view.visible_chars` | `RELAY_BACKPORT_VIEW_VISIBLE_CHARS` | `500` (min 32) | Per-line character budget for `claude-code`. CLI: `--visible-chars N` |
 | `view.hide` | `RELAY_BACKPORT_VIEW_HIDE` | — | Pubkey prefixes omitted from `thread +N` / `show` catch-up. CLI: `--hide PREFIX` (repeatable, appended) |
 | `channels` | — | — | uuid → purpose string for the `claude-code` view; a miss prints `?` |
 | `identities` | — | — | pubkey → display label for the `claude-code` view; a miss prints `?` |

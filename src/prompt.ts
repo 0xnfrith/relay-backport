@@ -11,7 +11,7 @@
 //      as content — so a prompt from any ACP client still reaches the sinks.
 import { createHash } from "node:crypto";
 import type { EventLike, EventSource, PromptFields } from "./delivery";
-import { channelOf } from "./delivery";
+import { channelOf, threadRoot } from "./delivery";
 export type { PromptFields, PromptScope } from "./delivery";
 
 const HEX64 = /^[0-9a-f]{64}$/i;
@@ -167,15 +167,34 @@ export function parseBuzzPrompt(text: string): { event: EventLike; channel: stri
     }
   }
   if (channel && !tags.some((t) => t[0] === "h")) tags = [["h", channel], ...tags];
-  return { event: { id, kind, pubkey, content, tags, created_at }, channel, fields: parsePromptFields(text) };
+  const event = { id, kind, pubkey, content, tags, created_at };
+  return { event, channel, fields: parsePromptFields(text, event) };
+}
+
+/**
+ * The harness's own reply-instruction line (`IMPORTANT: … --reply-to <id>`).
+ * Description, channel name, and any other untrusted context line are skipped
+ * — a `--reply-to` inside those must not become the stored anchor.
+ */
+function replyFromInstruction(ctx: string): string | undefined {
+  for (const line of ctx.split("\n")) {
+    if (!/^IMPORTANT:/i.test(line.trim())) continue;
+    const m = line.match(/--reply-to[ =]+([0-9a-fA-F]{64})/i);
+    if (m?.[1] && HEX64.test(m[1])) return m[1].toLowerCase();
+  }
+  return undefined;
 }
 
 /**
  * Channel name, description, scope, sender display name and reply anchor,
  * read only from the prompt header / `<context>` block — never from
  * `Content:`, so a message body cannot forge them.
+ *
+ * The reply anchor is taken from the harness instruction line, then
+ * cross-checked against the event's `e` tags: if the two disagree, the tags
+ * win (`threadRoot`).
  */
-export function parsePromptFields(text: string): PromptFields {
+export function parsePromptFields(text: string, ev?: Pick<EventLike, "id" | "tags">): PromptFields {
   const fields: PromptFields = {};
   const ctx = outerBlock(text, "context")?.body ?? "";
   const block = outerBlock(text, "buzz-event")?.body ?? routingSegment(outerBlock(text, "buzz-events")) ?? "";
@@ -198,10 +217,13 @@ export function parsePromptFields(text: string): PromptFields {
     if (name) fields.senderName = name;
   }
 
-  const replyInstr = ctx.match(/--reply-to[ =]+([0-9a-fA-F]{64})/);
-  const rootLine = field(ctx, "Thread root")?.trim();
-  const reply = replyInstr?.[1] ?? (rootLine && HEX64.test(rootLine) ? rootLine : undefined);
-  if (reply) fields.replyTo = reply.toLowerCase();
+  const fromInstruction = replyFromInstruction(ctx);
+  if (ev) {
+    const fromTags = threadRoot(ev).toLowerCase();
+    fields.replyTo = fromInstruction && fromInstruction !== fromTags ? fromTags : (fromInstruction ?? fromTags);
+  } else if (fromInstruction) {
+    fields.replyTo = fromInstruction;
+  }
 
   return fields;
 }
@@ -212,7 +234,7 @@ export function resolveEvent(text: string, meta: unknown): ResolvedEvent {
   const events = buzz && typeof buzz === "object" ? (buzz as { events?: unknown }).events : undefined;
   if (Array.isArray(events) && events.length > 0) {
     const event = asEvent(events[events.length - 1]);
-    if (event) return { event, channel: channelOf(event), source: "meta", events, fields: parsePromptFields(text) };
+    if (event) return { event, channel: channelOf(event), source: "meta", events, fields: parsePromptFields(text, event) };
   }
   const parsed = parseBuzzPrompt(text);
   if (parsed) return { ...parsed, source: "text" };

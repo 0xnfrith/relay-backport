@@ -11,10 +11,17 @@ import type { ThreadContextEntry } from "./thread-context";
 export const VIEW_NAMES = ["raw", "claude-code"] as const;
 export type ViewName = (typeof VIEW_NAMES)[number];
 
-/** Per-line visible budget for `claude-code`. The writer enforces it. */
+/** Per-line visible budget for `claude-code`. The writer enforces it. Counted in characters. */
 export const DEFAULT_VISIBLE_CHARS = 500;
 
-export const NEWLINE_MARK = " ⏎ ";
+/** `TEXT | <12 hex> | ` — the longest TEXT prefix (12-hex id). */
+export const TEXT_PREFIX_MAX = "TEXT | ".length + 12 + " | ".length;
+
+/** Floor: TEXT prefix plus some body. Smaller values cannot hold a TEXT line. */
+export const MIN_VISIBLE_CHARS = TEXT_PREFIX_MAX + 10;
+
+/** ASCII stand-in for a newline inside TEXT, so the byte length matches the character budget. */
+export const NEWLINE_MARK = " \\n ";
 
 const NAME_MAX = 32;
 const TITLE_MAX = 40;
@@ -38,9 +45,13 @@ export function clip(s: string, max: number): string {
   return s.slice(0, max);
 }
 
-/** Header fields cannot contain newlines or `|` — those would wrap or split. */
+/**
+ * Header fields cannot contain newlines, `|`, or brackets. Newlines/`|`
+ * would wrap or shift fields; `[` `]` would let a display name or
+ * description imitate the `[human, owner]` status block.
+ */
 export function oneLine(s: string): string {
-  return s.replace(/[\n\r|]+/g, " ").replace(/ +/g, " ").trim();
+  return s.replace(/[\n\r|[\]|]+/g, " ").replace(/ +/g, " ").trim();
 }
 
 function lookup(map: Record<string, string> | undefined, key: string | undefined): string | undefined {
@@ -78,6 +89,14 @@ function authOwner(tags: unknown): string | undefined {
 
 export type SenderClass = "human" | "agent" | "unknown";
 
+export type SenderClassInfo = {
+  kind: SenderClass;
+  /** Configured owner sending as themselves → `[human, owner]` (no name). */
+  ownerSelf?: true;
+  /** Agent whose auth owner is the configured owner → `[agent, owner <name>]`. */
+  ownerLabel?: string;
+};
+
 /**
  * `auth` tag → agent (tag[1] is the owner's key). No tag: `human` only if the
  * key is the configured owner or is labelled in `identities`; otherwise
@@ -87,7 +106,7 @@ export function classifySender(
   pubkey: string,
   tags: unknown,
   opts: Pick<ClaudeCodeViewOptions, "identities" | "owner">,
-): { kind: SenderClass; ownerLabel?: string } {
+): SenderClassInfo {
   const ownerTag = authOwner(tags);
   const labelled = Boolean(lookup(opts.identities, pubkey));
   let kind: SenderClass;
@@ -95,10 +114,28 @@ export function classifySender(
   else if (isOwnerKey(pubkey, opts.owner) || labelled) kind = "human";
   else kind = "unknown";
 
-  const ownerKey = isOwnerKey(pubkey, opts.owner) ? opts.owner : ownerTag && isOwnerKey(ownerTag, opts.owner) ? opts.owner : undefined;
-  if (!ownerKey) return { kind };
-  const ownerLabel = clip(oneLine(lookup(opts.identities, ownerKey) ?? "?"), LABEL_MAX);
-  return { kind, ownerLabel };
+  if (kind === "human" && isOwnerKey(pubkey, opts.owner)) return { kind, ownerSelf: true };
+  if (kind === "agent" && ownerTag && isOwnerKey(ownerTag, opts.owner)) {
+    return { kind, ownerLabel: clip(oneLine(lookup(opts.identities, opts.owner) ?? "?"), LABEL_MAX) };
+  }
+  return { kind };
+}
+
+function classBracket(cls: SenderClassInfo): string {
+  if (cls.kind === "human" && cls.ownerSelf) return "[human, owner]";
+  if (cls.kind === "agent" && cls.ownerLabel) return `[agent, owner ${cls.ownerLabel}]`;
+  return `[${cls.kind}]`;
+}
+
+/** Absent `scope` falls back to tags: a root (or reply) `e` tag means thread. */
+export function scopeOf(obj: Pick<MentionLine, "scope" | "tags">): "dm" | "thread" | "channel" {
+  if (obj.scope === "dm" || obj.scope === "thread" || obj.scope === "channel") return obj.scope;
+  if (Array.isArray(obj.tags)) {
+    for (const t of obj.tags) {
+      if (Array.isArray(t) && t[0] === "e" && (t[3] === "root" || t[3] === "reply")) return "thread";
+    }
+  }
+  return "channel";
 }
 
 const ENTRY_HEAD = /^\[(\d+)\] (.+?) \(([0-9a-fA-F]{8,64})\) \(([^)]+)\): /gm;
@@ -175,12 +212,10 @@ function hhmmz(createdAt: unknown): string {
 }
 
 function replyOf(obj: MentionLine): string {
-  if (typeof obj.reply_to === "string" && /^[0-9a-f]{64}$/i.test(obj.reply_to)) return obj.reply_to.toLowerCase();
-  try {
-    return threadRoot({ id: typeof obj.id === "string" ? obj.id : "", tags: Array.isArray(obj.tags) ? obj.tags : [] });
-  } catch {
-    return typeof obj.id === "string" && /^[0-9a-f]{64}$/i.test(obj.id) ? obj.id.toLowerCase() : "?";
-  }
+  const fromTags = threadRoot({ id: typeof obj.id === "string" ? obj.id : "", tags: Array.isArray(obj.tags) ? obj.tags : [] }).toLowerCase();
+  const fromField = typeof obj.reply_to === "string" && /^[0-9a-f]{64}$/i.test(obj.reply_to) ? obj.reply_to.toLowerCase() : undefined;
+  if (fromField && fromField !== fromTags) return fromTags;
+  return fromField ?? fromTags ?? "?";
 }
 
 function threadTitle(threadContext: unknown): string | undefined {
@@ -201,9 +236,8 @@ function threadTitle(threadContext: unknown): string | undefined {
   return undefined;
 }
 
-function whoClause(display: string, cls: { kind: SenderClass; ownerLabel?: string }): string {
-  const owner = cls.ownerLabel !== undefined ? `, owner ${cls.ownerLabel}` : "";
-  return `from ${display} [${cls.kind}${owner}]`;
+function whoClause(display: string, cls: SenderClassInfo): string {
+  return `from ${display} ${classBracket(cls)}`;
 }
 
 /**
@@ -233,7 +267,7 @@ export function projectClaudeCode(line: string, opts: ClaudeCodeViewOptions = {}
   const ch = (typeof obj.h === "string" && obj.h ? obj.h : channelOf({ tags: obj.tags ?? [] })) || "?";
   const pubkey = typeof obj.from === "string" && obj.from !== "unknown" ? obj.from : "";
   const tags = obj.tags;
-  const scope = obj.scope === "dm" || obj.scope === "thread" || obj.scope === "channel" ? obj.scope : "channel";
+  const scope = scopeOf(obj);
   const type = scope === "dm" ? "dm" : "mention";
 
   const display = clip(
@@ -262,8 +296,7 @@ export function projectClaudeCode(line: string, opts: ClaudeCodeViewOptions = {}
       thread += ` (${clip(inner, speakersMax)})`;
     }
     if (type === "dm") {
-      const dmWho = `DM with ${display} [${cls.kind}${cls.ownerLabel !== undefined ? `, owner ${cls.ownerLabel}` : ""}]`;
-      return `WAKE dm | ${dmWho} | reply ${reply} | ch ${ch} | id ${id12} | ${at} | ${thread} | ${len}`;
+      return `WAKE dm | DM with ${display} ${classBracket(cls)} | reply ${reply} | ch ${ch} | id ${id12} | ${at} | ${thread} | ${len}`;
     }
     return `WAKE ${type} | #${name} (${scopeBit}) - ${purpose} | ${who} | reply ${reply} | ch ${ch} | id ${id12} | ${at} | ${thread} | ${len}`;
   };
@@ -296,5 +329,7 @@ export function projectClaudeCode(line: string, opts: ClaudeCodeViewOptions = {}
   const textPrefix = `TEXT | ${id12} | `;
   const room = Math.max(0, budget - textPrefix.length);
   const textBody = clip(marked, room);
-  return `${header}\n${textPrefix}${textBody}`;
+  let textLine = `${textPrefix}${textBody}`;
+  if (textLine.length > budget) textLine = textLine.slice(0, budget);
+  return `${header}\n${textLine}`;
 }

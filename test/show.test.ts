@@ -16,12 +16,12 @@ import { tmpDir } from "./helpers/tmp";
 const OLD = "a".repeat(64);
 const NEW = "b".repeat(64);
 const HIDE = "c".repeat(64);
-const NICK = "1".repeat(64);
+const PEER = "1".repeat(64);
 
 function mention(id: string, over: Record<string, unknown> = {}): string {
   return `MENTION|${JSON.stringify({
     kind: 9,
-    from: NICK.slice(0, 8),
+    from: PEER.slice(0, 8),
     h: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     content: over.content ?? "body",
     id,
@@ -61,12 +61,12 @@ describe("resolveMention", () => {
 
 describe("filterCatchUp", () => {
   test("hides matching authors in block prose and event entries; a format change keeps the block", () => {
-    const block = `[1] me (${HIDE}) (t): hide me\n[2] them (${NICK}) (t): keep me`;
+    const block = `[1] me (${HIDE}) (t): hide me\n[2] them (${PEER}) (t): keep me`;
     const { kept, hidden } = filterCatchUp(
       [
         { kind: "block", event_id: NEW, at: 1, text: block },
         { kind: "event", event_id: OLD, at: 2, text: `[previously delivered mention] from ${HIDE} · t · event ${OLD}\nown` },
-        { kind: "event", event_id: "d".repeat(64), at: 3, text: `[previously delivered mention] from ${NICK} · t · event x\nkept event` },
+        { kind: "event", event_id: "d".repeat(64), at: 3, text: `[previously delivered mention] from ${PEER} · t · event x\nkept event` },
       ],
       [HIDE.slice(0, 8)],
     );
@@ -87,7 +87,7 @@ describe("showDeliveries", () => {
   test("prints header, full message, filtered catch-up, hidden count; --raw is the untouched record", () => {
     const t = tmpDir();
     const path = join(t.dir, "d.jsonl");
-    const block = `[1] me (${HIDE}) (t): hide me\n[2] them (${NICK}) (t): the catch-up that should print`;
+    const block = `[1] me (${HIDE}) (t): hide me\n[2] them (${PEER}) (t): the catch-up that should print`;
     writeFileSync(
       path,
       [
@@ -95,9 +95,9 @@ describe("showDeliveries", () => {
         mention(OLD, { content: "older mention body", thread_context: [] }),
         mention(NEW, {
           content: "latest mention body",
-          tags: [["e", "rootid", "", "root"], ["e", OLD, "", "reply"], ["p", HIDE], ["p", NICK]],
+          tags: [["e", "rootid", "", "root"], ["e", OLD, "", "reply"], ["p", HIDE], ["p", PEER]],
           thread_context: [
-            { kind: "event", event_id: OLD, at: 1, text: `from ${NICK} · earlier event` },
+            { kind: "event", event_id: OLD, at: 1, text: `from ${PEER} · earlier event` },
             { kind: "block", event_id: NEW, at: 2, text: block },
           ],
         }),
@@ -106,10 +106,10 @@ describe("showDeliveries", () => {
     );
 
     const out = showDeliveries({ path, hide: [HIDE.slice(0, 8)] });
-    expect(out).toContain(`${NEW} from=${NICK.slice(0, 8)} h=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa root=rootid reply=${OLD} p=${HIDE},${NICK}`);
+    expect(out).toContain(`${NEW} from=${PEER.slice(0, 8)} h=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa root=rootid reply=${OLD} p=${HIDE},${PEER}`);
     expect(out).toContain("latest mention body");
     expect(out).toContain("the catch-up that should print");
-    expect(out).toContain("from " + NICK);
+    expect(out).toContain("from " + PEER);
     expect(out).toContain("1 message hidden");
     expect(out).not.toContain("hide me");
 

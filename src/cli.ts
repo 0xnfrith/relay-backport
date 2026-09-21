@@ -19,7 +19,7 @@ import { buildPlan, pgrepSessionTitle, preflight, probeUrl, renderPlan, runHarne
 import { ShowError, showDeliveries } from "./show";
 import { stripThreadContext, tailFile } from "./tail";
 import { NAME, VERSION } from "./version";
-import { DEFAULT_VISIBLE_CHARS, projectClaudeCode } from "./view";
+import { DEFAULT_VISIBLE_CHARS, MIN_VISIBLE_CHARS, projectClaudeCode } from "./view";
 import { join, resolve } from "node:path";
 
 export const HELP = `${NAME} ${VERSION}
@@ -69,7 +69,7 @@ OPTIONS (tail)
   --no-thread          strip thread_context from MENTION lines (for a human watching the wire)
   --no-follow          print and exit
   --view NAME          raw (default) | claude-code — a named projection of each record
-  --visible-chars N    per-line budget for --view claude-code (default ${DEFAULT_VISIBLE_CHARS})
+  --visible-chars N    per-line budget for --view claude-code (default ${DEFAULT_VISIBLE_CHARS}, min ${MIN_VISIBLE_CHARS})
   --hide PREFIX        pubkey prefix omitted from the view's thread count (repeatable)
 
 OPTIONS (show)
