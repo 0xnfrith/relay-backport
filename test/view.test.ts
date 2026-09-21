@@ -136,7 +136,7 @@ describe("projectClaudeCode", () => {
   test("thread title is capped at 40; purpose config wins over description; miss is ?", () => {
     const longTitle = "this thread title is definitely longer than forty characters of text";
     const line = mention(
-      {},
+      { tags: [["h", CHANNEL], ["e", ROOT, "", "root"]] },
       {
         extra: {
           channelName: "general",
@@ -147,10 +147,10 @@ describe("projectClaudeCode", () => {
         },
         threadContext: [
           {
-            kind: "block",
+            kind: "event",
             event_id: ROOT,
             at: 1,
-            text: `[1] Alice (${SENDER}) (2026-09-21T12:00:00+00:00): ${longTitle}`,
+            text: `[previously delivered mention] from ${SENDER} · t · event ${ROOT}\n${longTitle}`,
           },
         ],
       },
@@ -164,6 +164,56 @@ describe("projectClaudeCode", () => {
     const miss = projectClaudeCode(mention({}, { extra: { scope: "channel" } }));
     expect(miss.split("\n")[0]!).toContain("#? (channel) - ?");
     expect(miss.split("\n")[0]!).toContain("from 12345678 [unknown]");
+  });
+
+  test("thread title comes from the root id, not the first catch-up entry; omitted when the root is absent", () => {
+    const rootText = "research task, compact wake line";
+    const notRoot = mention(
+      { tags: [["h", CHANNEL], ["e", ROOT, "", "root"]] },
+      {
+        extra: { scope: "thread", replyTo: ROOT },
+        threadContext: [
+          {
+            kind: "block",
+            event_id: ID,
+            at: 1,
+            text: `[1] Alice (${SENDER}) (t): I already replied, not the title`,
+          },
+          {
+            kind: "event",
+            event_id: ROOT,
+            at: 2,
+            text: `[previously delivered mention] from ${SENDER} · t · event ${ROOT}\n${rootText}`,
+          },
+        ],
+      },
+    );
+    const wake = projectClaudeCode(notRoot).split("\n")[0]!;
+    expect(wake).toContain(`(thread "${rootText}")`);
+    expect(wake).not.toContain("I already replied");
+
+    const absent = mention(
+      { tags: [["h", CHANNEL], ["e", ROOT, "", "root"]] },
+      {
+        extra: { scope: "thread", replyTo: ROOT },
+        threadContext: [
+          {
+            kind: "block",
+            event_id: ID,
+            at: 1,
+            text: `[1] Alice (${SENDER}) (t): I already replied, not the title`,
+          },
+        ],
+      },
+    );
+    const absentWake = projectClaudeCode(absent).split("\n")[0]!;
+    expect(absentWake).toContain("(thread)");
+    expect(absentWake).not.toContain("I already replied");
+    expect(absentWake).not.toMatch(/\(thread "/);
+
+    const titles = new Map<string, string>();
+    expect(projectClaudeCode(notRoot, { titles }).split("\n")[0]!).toContain(`(thread "${rootText}")`);
+    expect(projectClaudeCode(absent, { titles }).split("\n")[0]!).toContain(`(thread "${rootText}")`);
   });
 
   test("thread +N counts catch-up not written by hide prefixes, grouped by speaker", () => {

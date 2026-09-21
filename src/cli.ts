@@ -340,6 +340,7 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
           thread_context: !noThread,
           view: viewName,
         });
+        const titles = new Map<string, string>();
         const writeLine = (l: string) => {
           if (viewName === "claude-code") {
             // Two lines in one write so a Monitor that batches near-simultaneous
@@ -351,6 +352,7 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
                 channels: cfg.channels,
                 identities: cfg.identities,
                 owner: cfg.run.owner,
+                titles,
               }),
             );
             return;

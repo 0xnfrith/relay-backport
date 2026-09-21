@@ -38,6 +38,11 @@ export type ClaudeCodeViewOptions = {
   identities?: Record<string, string>;
   /** Configured owner pubkey. Owner status comes only from here, never from text. */
   owner?: string;
+  /**
+   * Optional root-id → title cache for a long-lived `tail`. When a record
+   * reveals the root's text, later records in the same thread reuse it.
+   */
+  titles?: Map<string, string>;
 };
 
 export function clip(s: string, max: number): string {
@@ -218,22 +223,69 @@ function replyOf(obj: MentionLine): string {
   return fromField ?? fromTags ?? "?";
 }
 
-function threadTitle(threadContext: unknown): string | undefined {
-  if (!Array.isArray(threadContext) || threadContext.length === 0) return undefined;
-  for (const item of threadContext) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const rec = item as ThreadContextEntry;
-    if (rec.kind !== "block" || typeof rec.text !== "string") continue;
-    const entries = splitBlockEntries(rec.text);
-    const first = entries[0];
-    if (!first) continue;
-    const body = first.pubkey
-      ? first.text.replace(/^\[\d+\] .+? \([0-9a-fA-F]{8,64}\) \([^)]+\): /, "")
-      : first.text;
-    const title = clip(oneLine(body), TITLE_MAX);
-    if (title) return title;
+const HEX64 = /^[0-9a-f]{64}$/i;
+
+/**
+ * The thread root id: a root `e` tag, else the stored `reply_to`. No
+ * fallback to "whatever is first in the catch-up" or to the current event
+ * (that would make the title change every turn).
+ */
+export function threadRootId(obj: Pick<MentionLine, "reply_to" | "tags">): string | undefined {
+  if (Array.isArray(obj.tags)) {
+    for (const t of obj.tags) {
+      if (Array.isArray(t) && t[0] === "e" && t[3] === "root" && typeof t[1] === "string" && HEX64.test(t[1])) {
+        return t[1].toLowerCase();
+      }
+    }
   }
+  if (typeof obj.reply_to === "string" && HEX64.test(obj.reply_to)) return obj.reply_to.toLowerCase();
   return undefined;
+}
+
+function deliveredEventBody(text: string): string {
+  const m = text.match(/^\[previously delivered mention\][^\n]*\n([\s\S]*)/);
+  return m ? m[1]! : text;
+}
+
+function entryIsRoot(rec: ThreadContextEntry, rootId: string): boolean {
+  const eid = typeof rec.event_id === "string" ? rec.event_id.toLowerCase() : "";
+  const text = typeof rec.text === "string" ? rec.text : "";
+  // Block entries are keyed by the prompt that *carried* the block, not by
+  // a message inside it — matching those would pick the wrong text.
+  if (rec.kind === "block") return text.toLowerCase().includes(`event ${rootId}`);
+  return eid === rootId || text.toLowerCase().includes(`event ${rootId}`);
+}
+
+/**
+ * Title of the thread: the root message's text, and only that. Looked up by
+ * id on this record (if this event *is* the root) or in catch-up event
+ * entries. A miss returns undefined so the header prints `(thread)` with no
+ * quoted title — never another entry's opening words.
+ */
+export function threadTitleFromRoot(
+  obj: Pick<MentionLine, "id" | "content" | "reply_to" | "tags" | "thread_context">,
+  titles?: Map<string, string>,
+): string | undefined {
+  const rootId = threadRootId(obj);
+  if (!rootId) return undefined;
+  const id = typeof obj.id === "string" ? obj.id.toLowerCase() : "";
+  let raw: string | undefined;
+  if (id === rootId && typeof obj.content === "string" && obj.content) raw = obj.content;
+  if (!raw && Array.isArray(obj.thread_context)) {
+    for (const item of obj.thread_context) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const rec = item as ThreadContextEntry;
+      if (typeof rec.text !== "string" || !entryIsRoot(rec, rootId)) continue;
+      const body = deliveredEventBody(rec.text);
+      if (body.trim()) {
+        raw = body;
+        break;
+      }
+    }
+  }
+  const title = raw ? clip(oneLine(raw), TITLE_MAX) : titles?.get(rootId);
+  if (title && titles) titles.set(rootId, title);
+  return title || undefined;
 }
 
 function whoClause(display: string, cls: SenderClassInfo): string {
@@ -279,7 +331,7 @@ export function projectClaudeCode(line: string, opts: ClaudeCodeViewOptions = {}
 
   const purposeRaw = lookup(channels, ch) || (typeof obj.channel_description === "string" ? obj.channel_description : "") || "?";
   const nameRaw = (typeof obj.channel_name === "string" && obj.channel_name) || "?";
-  const titleRaw = scope === "thread" ? threadTitle(obj.thread_context) : undefined;
+  const titleRaw = scope === "thread" ? threadTitleFromRoot(obj, opts.titles) : undefined;
   const speakers = catchUpSpeakers(obj.thread_context, hide, identities);
   const reply = replyOf(obj);
   const at = hhmmz(obj.created_at);
