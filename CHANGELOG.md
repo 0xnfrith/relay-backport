@@ -2,6 +2,24 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.5.0 — 2026-09-21
+
+named views on `tail`, and `show` — both off by default
+
+### Added
+
+- **Views.** One stored `MENTION|` record, many per-reader projections. A view never rewrites the file; `tail --view NAME` (or `view.name` in config) prints a shape one kind of consumer can read. Default `raw` is the stored line, unchanged. The first named view is `claude-code`.
+- **`claude-code` view.** For each record, two lines in **one write**: a `WAKE` header (type, channel name, scope, thread title, purpose, sender, class, owner, reply anchor, channel uuid, short event id, time, catch-up count by speaker, content length) and a `TEXT` line (short id + message, newlines shown as the ASCII marker ` \n `). Lifecycle `EVENT|` lines pass through. The visible budget is `view.visible_chars` (default 500, minimum 32); the writer enforces every cap so neither line exceeds it. Truncate, never wrap. A message body that starts with `WAKE ` or `TEXT |` stays on the TEXT line and cannot forge a header. Untrusted names cannot carry `[` `]`. The configured owner renders as `[human, owner]`; `owner <name>` is only for an agent's owner. Absent `scope` falls back to a root/reply `e` tag meaning thread. The quoted title is the root message, from this record's `id` or a catch-up `event` entry's `event_id` only — never from prose or a `block`; a miss prints `(thread)` with no title. The tail's root→title cache is capped at 256, oldest out.
+- **Prompt-header fields on the record**, behind `file.prompt_fields` (default **off**). `parseBuzzPrompt` already received channel name, description, scope, sender display name and the `--reply-to` anchor and discarded them. When the switch is on they are appended last on the JSON (`channel_name`, `channel_description`, `scope`, `sender_name`, `reply_to`, `created_at`). Extra keys, even at the end, change the bytes, so the v0.1 byte-identical promise needs the switch — existing readers that ignore unknown keys still parse.
+- **Optional overlay tables.** `[channels]` uuid → purpose string; `[identities]` pubkey → label. Config wins over the stored description / display name. A miss prints `?`. Owner status comes only from `run.owner`, never from text. `view.hide` (and `--hide`) are pubkey prefixes whose catch-up entries are omitted from `thread +N`.
+- **`relay-backport show [--last | --id PREFIX] [--hide PREFIX]… [--raw] [--file PATH]`.** Reads only the local deliveries file (the tail of the file; a partial last line is ignored). Prints a header, the full message, then the thread catch-up with hidden authors removed and a count of what was hidden. Refuses an ambiguous id prefix. `--raw` prints the untouched record. Catch-up block parsing (`[n] name (pubkey) (time): body`) is a tested function: a format change degrades to "print everything", never to a crash.
+- Cursor semantics of `tail` are unchanged: one file record advances the cursor by one, whatever the view prints.
+
+### Notes
+
+- Nothing about the webhook or exec sinks moves. A second named view is an addition, not a rewrite of the record.
+- Default output of `tail` and of the file sink is byte-identical to 0.4.0. Turn the new behaviour on with `tail --view claude-code` / `view.name = "claude-code"` and, to persist the words on the record, `file.prompt_fields = true`.
+
 ## 0.4.0 — 2026-09-20
 
 opt-in delivery receipt, default off

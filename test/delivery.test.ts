@@ -51,6 +51,25 @@ describe("MENTION| line (the v0.1 contract)", () => {
     expect(formatMentionLine(event(), 400)).toBe(formatMentionLine(event()));
   });
 
+  test("extra prompt-header keys are off by default: even at the end they would break the v0.1 bytes", () => {
+    const ev = event();
+    const v01 = `MENTION|${JSON.stringify({ kind: 9, from: SENDER.slice(0, 8), h: CHANNEL, content: "hi", id: ev.id, tags: ev.tags })}`;
+    expect(formatMentionLine(ev)).toBe(v01);
+    const extra = formatMentionLine(ev, 0, {
+      extra: { channelName: "general", scope: "channel", senderName: "Alice", replyTo: ev.id, created_at: 1 },
+    });
+    expect(extra).not.toBe(v01);
+    expect(extra.startsWith(v01.slice(0, -1))).toBe(true); // same prefix; extra keys appended
+    const parsed = JSON.parse(extra.slice("MENTION|".length));
+    expect(parsed.channel_name).toBe("general");
+    expect(parsed.scope).toBe("channel");
+    expect(parsed.sender_name).toBe("Alice");
+    expect(parsed.reply_to).toBe(ev.id);
+    expect(parsed.created_at).toBe(1);
+    const keys = Object.keys(parsed);
+    expect(keys.slice(-5)).toEqual(["channel_name", "scope", "sender_name", "reply_to", "created_at"]);
+  });
+
   test("thread root: root marker, else reply marker, else first e tag, else self", () => {
     expect(threadRoot(event({ tags: [["e", "1".repeat(64), "", "reply"], ["e", ROOT, "", "root"]] }))).toBe(ROOT);
     expect(threadRoot(event({ tags: [["e", ROOT, "", "reply"]] }))).toBe(ROOT);

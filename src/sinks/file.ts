@@ -65,6 +65,8 @@ export type FileSinkOptions = {
   threadContext?: FileThreadContextMode;
   /** Bound on the whole `thread_context` block; oldest entries dropped first. 0 = unlimited. */
   threadContextMaxChars?: number;
+  /** Append prompt-header words to the `MENTION|` JSON. Default false. */
+  promptFields?: boolean;
   /** Test seam: the ledger to use instead of the sink's own. */
   ledger?: ThreadContextLedger;
   /** Where the Buzz-injected env comes from. Default `process.env`. */
@@ -125,6 +127,7 @@ export class FileSink implements Sink {
   private readonly contentMaxChars: number;
   private readonly threadContextMode: FileThreadContextMode;
   private readonly threadContextMaxChars: number;
+  private readonly promptFields: boolean;
   private readonly ledger: ThreadContextLedger | undefined;
   /**
    * Per session, how many ledger entries the previous `MENTION|` line of that
@@ -144,6 +147,7 @@ export class FileSink implements Sink {
     this.contentMaxChars = opts.contentMaxChars ?? 0;
     this.threadContextMode = opts.threadContext ?? "cumulative";
     this.threadContextMaxChars = opts.threadContextMaxChars ?? DEFAULT_FILE_THREAD_CONTEXT_MAX_CHARS;
+    this.promptFields = opts.promptFields ?? false;
     if (this.threadContextMode !== "none") {
       // Its OWN ledger file. The webhook sink keeps `sessions/<id>.context.jsonl`;
       // two ledgers sharing one file would each append every entry, because
@@ -194,7 +198,11 @@ export class FileSink implements Sink {
       const thread = this.threadContextFor(delivery);
       appendLine(
         this.path,
-        formatMentionLine(delivery.event, this.contentMaxChars, { threadContext: thread.entries, threadTruncated: thread.truncated }),
+        formatMentionLine(delivery.event, this.contentMaxChars, {
+          threadContext: thread.entries,
+          threadTruncated: thread.truncated,
+          extra: this.promptFields ? { ...delivery.promptFields, created_at: delivery.event.created_at } : undefined,
+        }),
       );
       log.info("file delivered", { event: delivery.event.id, path: this.path });
       return true;

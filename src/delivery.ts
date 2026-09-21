@@ -4,6 +4,18 @@
 // webhook and exec sinks carry.
 import type { ThreadContextEntry } from "./thread-context";
 
+/** Header-only words the harness already sends and the v0.1 line discarded. */
+export type PromptScope = "dm" | "thread" | "channel";
+
+export type PromptFields = {
+  channelName?: string;
+  channelDescription?: string;
+  scope?: PromptScope;
+  senderName?: string;
+  /** The id the harness told the agent to pass to `--reply-to`. */
+  replyTo?: string;
+};
+
 /** The Buzz event behind a prompt, in Nostr shape. `pubkey` may be empty when unknown. */
 export type EventLike = {
   id: string;
@@ -39,6 +51,11 @@ export type Delivery = {
   /** `BUZZ_RELAY_URL` as injected by the harness, or "". */
   relay: string;
   receivedAt: number;
+  /**
+   * Words parsed from the prompt header (never from the message body).
+   * Written onto the `MENTION|` line only when `file.prompt_fields` is on.
+   */
+  promptFields?: PromptFields;
 };
 
 export const KIND_FORUM_REPLY = 45003;
@@ -93,6 +110,18 @@ export type MentionLine = {
   thread_context?: ThreadContextEntry[];
   /** True when `file.thread_context_max_chars` dropped the oldest entries. */
   thread_truncated?: true;
+  /**
+   * Prompt-header words, appended last, only when `file.prompt_fields` is on.
+   * Off by default: extra JSON keys, even at the end, change the bytes, so a
+   * line with them is not the v0.1 contract. Existing readers that ignore
+   * unknown keys still parse; the byte-identical promise needs the switch.
+   */
+  channel_name?: string;
+  channel_description?: string;
+  scope?: string;
+  sender_name?: string;
+  reply_to?: string;
+  created_at?: number;
 };
 
 export const UNKNOWN_SENDER = "unknown";
@@ -102,6 +131,11 @@ export type MentionLineOptions = {
   threadContext?: ThreadContextEntry[];
   /** The bound dropped the oldest entries from `threadContext`. */
   threadTruncated?: boolean;
+  /**
+   * Prompt-header fields to append after every field the line has ever
+   * carried. Omit (the default) to keep the line byte-identical to v0.1.
+   */
+  extra?: PromptFields & { created_at?: number };
 };
 
 /**
@@ -120,6 +154,7 @@ export function buildMentionLine(ev: EventLike, maxChars = 0, opts: MentionLineO
   const full = ev.content ?? "";
   const capped = maxChars > 0 && full.length > maxChars;
   const thread = opts.threadContext?.length ? opts.threadContext : undefined;
+  const extra = extraRecord(opts.extra);
   return {
     kind: ev.kind,
     from: ev.pubkey ? ev.pubkey.slice(0, 8) : UNKNOWN_SENDER,
@@ -130,6 +165,20 @@ export function buildMentionLine(ev: EventLike, maxChars = 0, opts: MentionLineO
     ...(rootId ? { rootId } : {}),
     ...(capped ? { truncated: true as const } : {}),
     ...(thread ? { thread_context: thread, ...(opts.threadTruncated ? { thread_truncated: true as const } : {}) } : {}),
+    ...extra,
+  };
+}
+
+/** Only defined values, in a fixed order, so tests can assert the bytes. */
+function extraRecord(extra: MentionLineOptions["extra"]): Partial<MentionLine> {
+  if (!extra) return {};
+  return {
+    ...(extra.channelName ? { channel_name: extra.channelName } : {}),
+    ...(extra.channelDescription ? { channel_description: extra.channelDescription } : {}),
+    ...(extra.scope ? { scope: extra.scope } : {}),
+    ...(extra.senderName ? { sender_name: extra.senderName } : {}),
+    ...(extra.replyTo ? { reply_to: extra.replyTo } : {}),
+    ...(typeof extra.created_at === "number" ? { created_at: extra.created_at } : {}),
   };
 }
 

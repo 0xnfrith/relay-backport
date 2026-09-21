@@ -10,8 +10,9 @@
 //   3. A synthetic event: a stable sha256 id, sender unknown, the raw prompt
 //      as content — so a prompt from any ACP client still reaches the sinks.
 import { createHash } from "node:crypto";
-import type { EventLike, EventSource } from "./delivery";
-import { channelOf } from "./delivery";
+import type { EventLike, EventSource, PromptFields } from "./delivery";
+import { channelOf, threadRoot } from "./delivery";
+export type { PromptFields, PromptScope } from "./delivery";
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -21,6 +22,7 @@ export type ResolvedEvent = {
   channel: string;
   source: EventSource;
   events?: unknown[];
+  fields: PromptFields;
 };
 
 /** The text of every `text` content block, joined with newlines. */
@@ -126,7 +128,7 @@ function lastTagsLine(segment: string): { at: number; value: string } | undefine
  * the content and `Tags:` from after it — a forgery inside the content can
  * neither replace a header field nor the real tags.
  */
-export function parseBuzzPrompt(text: string): { event: EventLike; channel: string } | undefined {
+export function parseBuzzPrompt(text: string): { event: EventLike; channel: string; fields: PromptFields } | undefined {
   const block = outerBlock(text, "buzz-event")?.body ?? routingSegment(outerBlock(text, "buzz-events"));
   if (!block) return undefined;
 
@@ -165,7 +167,65 @@ export function parseBuzzPrompt(text: string): { event: EventLike; channel: stri
     }
   }
   if (channel && !tags.some((t) => t[0] === "h")) tags = [["h", channel], ...tags];
-  return { event: { id, kind, pubkey, content, tags, created_at }, channel };
+  const event = { id, kind, pubkey, content, tags, created_at };
+  return { event, channel, fields: parsePromptFields(text, event) };
+}
+
+/**
+ * The harness's own reply-instruction line (`IMPORTANT: … --reply-to <id>`).
+ * Description, channel name, and any other untrusted context line are skipped
+ * — a `--reply-to` inside those must not become the stored anchor.
+ */
+function replyFromInstruction(ctx: string): string | undefined {
+  for (const line of ctx.split("\n")) {
+    if (!/^IMPORTANT:/i.test(line.trim())) continue;
+    const m = line.match(/--reply-to[ =]+([0-9a-fA-F]{64})/i);
+    if (m?.[1] && HEX64.test(m[1])) return m[1].toLowerCase();
+  }
+  return undefined;
+}
+
+/**
+ * Channel name, description, scope, sender display name and reply anchor,
+ * read only from the prompt header / `<context>` block — never from
+ * `Content:`, so a message body cannot forge them.
+ *
+ * The reply anchor is taken from the harness instruction line, then
+ * cross-checked against the event's `e` tags: if the two disagree, the tags
+ * win (`threadRoot`).
+ */
+export function parsePromptFields(text: string, ev?: Pick<EventLike, "id" | "tags">): PromptFields {
+  const fields: PromptFields = {};
+  const ctx = outerBlock(text, "context")?.body ?? "";
+  const block = outerBlock(text, "buzz-event")?.body ?? routingSegment(outerBlock(text, "buzz-events")) ?? "";
+
+  const scopeRaw = (field(ctx, "Scope") ?? "").trim().toLowerCase();
+  if (scopeRaw === "dm" || scopeRaw === "thread" || scopeRaw === "channel") fields.scope = scopeRaw;
+
+  const desc = field(ctx, "Description")?.trim();
+  if (desc) fields.channelDescription = desc;
+
+  const channelLine = headerField(block, "Channel") ?? field(ctx, "Channel") ?? "";
+  const named = channelLine.match(/^(.*) \(#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\)\s*$/i);
+  const channelName = named?.[1]?.trim();
+  if (channelName) fields.channelName = channelName;
+
+  const fromLine = headerField(block, "From") ?? "";
+  if (fromLine) {
+    const cut = fromLine.search(/ \((?:npub:|hex:)/i);
+    const name = (cut >= 0 ? fromLine.slice(0, cut) : fromLine).trim();
+    if (name) fields.senderName = name;
+  }
+
+  const fromInstruction = replyFromInstruction(ctx);
+  if (ev) {
+    const fromTags = threadRoot(ev).toLowerCase();
+    fields.replyTo = fromInstruction && fromInstruction !== fromTags ? fromTags : (fromInstruction ?? fromTags);
+  } else if (fromInstruction) {
+    fields.replyTo = fromInstruction;
+  }
+
+  return fields;
 }
 
 /** Resolve the event a prompt is about (see the precedence at the top of the file). */
@@ -174,7 +234,7 @@ export function resolveEvent(text: string, meta: unknown): ResolvedEvent {
   const events = buzz && typeof buzz === "object" ? (buzz as { events?: unknown }).events : undefined;
   if (Array.isArray(events) && events.length > 0) {
     const event = asEvent(events[events.length - 1]);
-    if (event) return { event, channel: channelOf(event), source: "meta", events };
+    if (event) return { event, channel: channelOf(event), source: "meta", events, fields: parsePromptFields(text, event) };
   }
   const parsed = parseBuzzPrompt(text);
   if (parsed) return { ...parsed, source: "text" };
@@ -182,5 +242,6 @@ export function resolveEvent(text: string, meta: unknown): ResolvedEvent {
     event: { id: syntheticId(text), kind: 9, pubkey: "", content: text, tags: [], created_at: Math.floor(Date.now() / 1000) },
     channel: "",
     source: "synthetic",
+    fields: {},
   };
 }

@@ -56,7 +56,7 @@ const evEntry = (id: string, text: string): LedgerEntry => ({ event_id: id, at: 
 
 describe("thread context: extraction", () => {
   test("takes the <thread-context> block, then <conversation-context>, else nothing", () => {
-    expect(extractThreadContext("<thread-context>\nNick: hi\n</thread-context>\n\nnow do the thing")).toBe("Nick: hi");
+    expect(extractThreadContext("<thread-context>\nAda: hi\n</thread-context>\n\nnow do the thing")).toBe("Ada: hi");
     expect(extractThreadContext("<conversation-context>\nrecent\n</conversation-context>")).toBe("recent");
     // thread wins when a prompt somehow carries both
     expect(extractThreadContext("<conversation-context>\nc\n</conversation-context>\n<thread-context>\nt\n</thread-context>")).toBe("t");
@@ -162,13 +162,13 @@ describe("thread context: the webhook payload", () => {
 
     // turn 1: the harness sends the history. The turn's OWN mention is not
     // folded in — it is already in `prompt` and `text`.
-    const first = sink.payloadFor(delivery("<thread-context>\nNick: can you look at the deploy\n</thread-context>\n@agent yes?", "sess-1", "yes?"));
-    expect(first.thread_context_cumulative).toBe("Nick: can you look at the deploy");
+    const first = sink.payloadFor(delivery("<thread-context>\nAda: can you look at the deploy\n</thread-context>\n@agent yes?", "sess-1", "yes?"));
+    expect(first.thread_context_cumulative).toBe("Ada: can you look at the deploy");
     expect(first.thread_context_cumulative).not.toContain("yes?");
 
     // turn 2: the harness says the context was "already delivered in this session"
     const second = sink.payloadFor(delivery("Earlier thread context was already delivered in this session.\n@agent and now?", "sess-1", "and now?"));
-    expect(second.thread_context_cumulative).toContain("Nick: can you look at the deploy");
+    expect(second.thread_context_cumulative).toContain("Ada: can you look at the deploy");
     // …and turn 1's OWN text, which the harness will never send again
     expect(second.thread_context_cumulative).toContain("yes?");
     expect(second.thread_context_cumulative).toContain("[previously delivered mention]");
@@ -180,7 +180,7 @@ describe("thread context: the webhook payload", () => {
     // turn 3 brings a new block: everything is carried, in delivery order
     const third = sink.payloadFor(delivery("<thread-context>\nAllen: and the rollback\n</thread-context>\n@agent ok", "sess-1", "ok"));
     const c = third.thread_context_cumulative!;
-    expect(c.indexOf("Nick: can you look at the deploy")).toBeLessThan(c.indexOf("yes?"));
+    expect(c.indexOf("Ada: can you look at the deploy")).toBeLessThan(c.indexOf("yes?"));
     expect(c.indexOf("yes?")).toBeLessThan(c.indexOf("and now?"));
     expect(c.indexOf("and now?")).toBeLessThan(c.indexOf("Allen: and the rollback"));
     expect(c).not.toContain("\nok");

@@ -91,6 +91,26 @@ describe("file sink", () => {
     expect(capped.truncated).toBe(true);
   });
 
+  test("file.prompt_fields is off by default; when on, header words are appended after existing keys", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const path = join(t.dir, "deliveries.jsonl");
+    const d = delivery("hello");
+    d.promptFields = { channelName: "general", scope: "channel", senderName: "Alice", replyTo: d.event.id };
+    expect(await new FileSink({ path }).deliver(d)).toBe(true);
+    expect(await new FileSink({ path, promptFields: true }).deliver(d)).toBe(true);
+    const lines = readFileSync(path, "utf8").trimEnd().split("\n");
+    const off = JSON.parse(lines[0]!.slice("MENTION|".length));
+    expect(off.channel_name).toBeUndefined();
+    expect(Object.keys(off)).toEqual(["kind", "from", "h", "content", "id", "tags"]);
+    const on = JSON.parse(lines[1]!.slice("MENTION|".length));
+    expect(on.channel_name).toBe("general");
+    expect(on.scope).toBe("channel");
+    expect(on.sender_name).toBe("Alice");
+    expect(on.reply_to).toBe(d.event.id);
+    expect(on.created_at).toBe(1);
+  });
+
   test("a system prompt (or buzz env file) write that fails does not suppress the EVENT|session|new| lifecycle line", () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);

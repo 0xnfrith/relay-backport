@@ -32,6 +32,22 @@ system_prompt = true
 # a terminal session can `source` it and use the `buzz` CLI as the agent.
 # This holds the agent's private key — off by default.
 # buzz_env_file = "/var/lib/relay-backport/buzz.env"
+# Append prompt-header words to the MENTION| JSON. Off by default so the
+# v0.1 line stays byte-identical.
+# prompt_fields = false
+
+# Named projection `tail` applies on the way out. Default raw = the stored line.
+# [view]
+# name = "claude-code"
+# visible_chars = 500
+# hide = ["<pubkey prefix of the reader>"]
+
+# Overlay tables for the claude-code view. Config wins over the stored
+# description / display name. A miss prints "?".
+# [channels]
+# "<channel uuid>" = "short purpose, 40 chars"
+# [identities]
+# "<pubkey hex>" = "display label"
 
 [webhook]
 url = "https://hooks.example.com/relay-backport"
