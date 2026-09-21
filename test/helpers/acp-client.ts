@@ -122,18 +122,29 @@ export function buzzFramedPrompt(opts: {
   threadRoot?: string;
   time?: string;
   senderLabel?: string;
+  channelName?: string;
+  description?: string;
+  scope?: string;
+  replyTo?: string;
 }): string {
+  const channelName = opts.channelName ?? "general";
+  const scope = opts.scope ?? (opts.threadRoot ? "thread" : "channel");
+  const replyTo = opts.replyTo ?? opts.threadRoot ?? (scope === "channel" || scope === "dm" ? opts.eventId : undefined);
   const ctx = [
-    `Scope: ${opts.threadRoot ? "thread" : "channel"}`,
-    `Session scope: ${opts.threadRoot ? "thread" : "channel"}`,
-    `Channel: general (#${opts.channel})`,
+    `Scope: ${scope}`,
+    `Session scope: ${scope}`,
+    `Channel: ${channelName} (#${opts.channel})`,
+    ...(opts.description ? [`Description: ${opts.description}`] : []),
     ...(opts.threadRoot ? [`Thread root: ${opts.threadRoot}`] : []),
     "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch thread context.",
+    ...(replyTo
+      ? [`IMPORTANT: For ordinary replies in this turn, use \`--reply-to ${replyTo}\` on \`buzz messages send\`.`]
+      : []),
   ].join("\n");
   const tags = JSON.stringify([["h", opts.channel], ...(opts.threadRoot ? [["e", opts.threadRoot, "", "root"]] : []), ["p", "c".repeat(64)]]);
   const ev = [
     `Event ID: ${opts.eventId}`,
-    `Channel: general (#${opts.channel})`,
+    `Channel: ${channelName} (#${opts.channel})`,
     `Kind: ${opts.kind ?? 9}`,
     `From: ${opts.senderLabel ?? "Alice"} (npub: npub1example, hex: ${opts.sender})`,
     `Time: ${opts.time ?? "2026-09-05T10:00:00+00:00"}`,

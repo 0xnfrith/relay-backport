@@ -161,6 +161,7 @@ export function startAcpServer(opts: AcpServerOptions): AcpServerHandle {
       systemPrompt: session.systemPrompt,
       relay: opts.relayUrl,
       receivedAt: Math.floor(Date.now() / 1000),
+      promptFields: resolved.fields,
     };
     log.info("acp prompt", { session: session.id, event: delivery.event.id, source: resolved.source, chars: text.length, sinks: opts.sinks.length });
 

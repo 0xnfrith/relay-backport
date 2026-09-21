@@ -16,7 +16,7 @@ Single static binary (Bun), no runtime dependencies, identical behaviour on Linu
 |---|---|---|
 | **Buzz Desktop custom harness** | Agents → Add custom harness → `relay-backport`; the Desktop's own `buzz-acp` spawns `relay-backport acp` | **ready** — the ACP flow is covered by tests against an in-process client that sends what the harness sends; the Desktop dialog itself is not exercised in CI |
 | **Headless `buzz-acp`** (a server, a container, the k8s agent image) | `BUZZ_ACP_AGENT_COMMAND=relay-backport BUZZ_ACP_AGENT_ARGS=acp buzz-acp` | **ready** — same ACP flow |
-| **Claude Code — interactive session** | `file` sink + `relay-backport tail` under the session's Monitor tool | **ready** — the `MENTION\|` line is the v0.1 shape, unchanged; the tail's cursor replays anything written while it was down |
+| **Claude Code — interactive session** | `file` sink + `relay-backport tail` under the session's Monitor tool | **ready** — default `tail` is the v0.1 `MENTION\|` line, unchanged; `tail --view claude-code` prints a two-line projection per record (see [Views](#views)); the tail's cursor replays anything written while it was down |
 | **Claude Code — headless (`claude -p`)**, any script or shell hook | `exec` sink, one process per prompt, JSON on stdin | **ready** — the sink is tested; a specific `claude -p` invocation is not |
 | **Webhook-driven bots** (cloud agents, Automations, any HTTP trigger) | `webhook` sink, JSON POST with retry | **ready** — `webhook.thread_context = "cumulative"` carries the thread history *and the mentions already delivered*, which a stateless receiver cannot keep |
 | **OpenAI Codex CLI — interactive TUI** | — | **uncertain — not yet investigated** |
@@ -101,8 +101,7 @@ Entries are oldest first, in delivery order: `kind: "block"` is history the harn
 
 `file.thread_context` picks how much of it rides along: **`cumulative`** (the default) is the whole session ledger; **`new`** is only what arrived since the previous `MENTION|` line of that session, for a consumer that reads every line and keeps its own history; **`none`** restores the 0.3.2 line exactly. The webhook sink's equivalent setting is `webhook.thread_context = delta | cumulative` — different values because a webhook receives one POST and nothing else, while a file consumer reads a stream of lines and `new` only makes sense there. The two sinks keep separate ledger files, `sessions/<id>.file-context.jsonl` and `sessions/<id>.context.jsonl`.
 
-Watching the wire by eye, `relay-backport tail --no-thread` strips `thread_context` and `thread_truncated` from the lines it prints (it still consumes them, so the cursor advances as usual).
-
+Watching the wire by eye, `relay-backport tail --no-thread` strips `thread_context` and `thread_truncated` from the lines it prints (it still consumes them, so the cursor advances as usual). `tail --view claude-code` is the named projection for this shape — see [Views](#views).
 
 ### 3. Gap replay: why a restart does not lose mentions
 
@@ -333,6 +332,46 @@ The sidebar is the point of the whole thing: a **session context** panel, one ro
 
 **It shows only what the harness accepted.** The respond-to gate ("who can send instructions") is Buzz's and runs *before* a prompt ever reaches relay-backport, so a message the harness declined never appears here — silence on the page means either nothing was sent, or the gate dropped it upstream, and the page cannot tell you which.
 
+## Views
+
+**One record, many views.** The file sink writes one `MENTION|{json}` record per delivery. That record is the contract — field order, byte-identical to v0.1 when nothing optional is on it — and it does not change for a particular consumer. A **view** is a named, per-reader projection: `tail --view NAME` (or `view.name` in config) prints a shape one kind of consumer can read, without rewriting the file. Default `raw` is the stored line. `claude-code` is the first named view; a webhook consumer or another harness gets its own view later as an addition, not a rewrite of the record.
+
+Cursor semantics do not depend on the view: **one file record advances the cursor by one**, whatever the view prints.
+
+### `claude-code`
+
+An interactive Claude Code session fed by a Monitor that cuts each **line** at about 500 characters and delivers lines printed together as one push. For each `MENTION|` record the view prints **two lines in one write**:
+
+```
+WAKE mention | #<channel> (<scope> "<thread title, 40 max>") - <purpose, 40 max> | from <name> [<human|agent|unknown>[, owner <name>]] | reply <64 hex> | ch <uuid> | id <12 hex> | <HH:MMZ> | thread +N (<speaker n>, ...) | <len>ch
+TEXT | <12 hex> | <message text, newlines as  ⏎  , cut so the line fits>
+```
+
+- The visible budget is `view.visible_chars` (default 500). The writer enforces every cap; the header never exceeds the budget. Truncate, never wrap.
+- `human` / `agent`: an `auth` tag on the event means agent, and its second element is the owner's key. No tag: `human` only if the key is `run.owner` or is labelled in `[identities]`; otherwise `unknown`. Owner status comes only from config, never from text.
+- Purpose: `[channels]` uuid → string, else the stored channel description, else `?`. `[identities]` pubkey → label wins over the stored sender name. A miss prints `?`.
+- `thread +N` counts catch-up entries not written by a `view.hide` / `--hide` pubkey prefix, grouped by speaker.
+- DMs: `WAKE dm | DM with <name> [...]` — no purpose.
+- Lifecycle `EVENT|` lines pass through unchanged.
+- A message body cannot forge a header: the body is last, on its own line, and a body that starts with `WAKE ` or `TEXT |` stays inert.
+
+The words on the `WAKE` line (channel name, description, scope, sender display name, reply anchor) are already in the prompt the harness sends. They are **not** on the stored record unless `file.prompt_fields = true` (default off). Extra JSON keys, even at the end, change the bytes of the line, so the v0.1 byte-identical promise needs that switch. The view still runs on a record without them: missing words print as `?`.
+
+```sh
+relay-backport tail --view claude-code
+relay-backport tail --view claude-code --visible-chars 500 --hide <pubkey-prefix>
+```
+
+### `show`
+
+`relay-backport show` is the step after the push: the full record from the **local** deliveries file, no relay.
+
+```
+relay-backport show [--last | --id PREFIX] [--hide PREFIX]... [--raw] [--file PATH]
+```
+
+`--last` (the default) is the newest `MENTION|` record. `--id` matches an event-id prefix and **refuses an ambiguous prefix** rather than picking the first. `--raw` prints the untouched record. The rest prints a header, the full message, then the thread catch-up with hidden authors' entries removed and a count of what was hidden. A partial last line in the file is ignored. Catch-up block parsing (`[n] name (pubkey) (time): body`) degrades to "print everything" if that prose changes — it does not crash.
+
 ## Configuration
 
 Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT_CONFIG`) < `RELAY_BACKPORT_*` environment < CLI flags. See [`deploy/relay-backport.example.toml`](deploy/relay-backport.example.toml) and [`.env.example`](.env.example). Every variable is prefixed so it can never collide with what the harness injects.
@@ -353,7 +392,13 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `file.content_max_chars` | `RELAY_BACKPORT_FILE_CONTENT_MAX_CHARS` | `0` (unlimited) | Cap the `MENTION|` line's `content` at N characters (CLI: `--file-content-max-chars N`); a cap that bites adds `"truncated":true` |
 | `file.thread_context` | `RELAY_BACKPORT_FILE_THREAD_CONTEXT` | `cumulative` | What the `MENTION|` line carries of the session's thread history: `none` (the 0.3.2 line), `new` (only what arrived since the previous line of that session), `cumulative` (the whole session ledger). CLI: `--file-thread-context MODE` |
 | `file.thread_context_max_chars` | `RELAY_BACKPORT_FILE_THREAD_CONTEXT_MAX_CHARS` | `32000` (0 = unlimited) | Bound on the whole `thread_context` block; whole entries dropped from the oldest end, `"thread_truncated":true` when they are. CLI: `--file-thread-context-max-chars N` |
+| `file.prompt_fields` | `RELAY_BACKPORT_FILE_PROMPT_FIELDS` | `false` | Append prompt-header words (`channel_name`, `scope`, `sender_name`, `reply_to`, …) to the `MENTION\|` JSON. Off so the v0.1 line stays byte-identical |
 | `file.buzz_env_file` | `RELAY_BACKPORT_FILE_BUZZ_ENV_FILE` | — (off) | Path to (re)write the present `BUZZ_RELAY_URL` / `BUZZ_PRIVATE_KEY` / `BUZZ_AUTH_TAG` to, on every `session/new` — holds the agent's private key; see [Security notes](#security-notes) |
+| `view.name` | `RELAY_BACKPORT_VIEW` | `raw` | `raw` (the stored line) or `claude-code`. CLI: `--view NAME` |
+| `view.visible_chars` | `RELAY_BACKPORT_VIEW_VISIBLE_CHARS` | `500` | Per-line budget for `claude-code`. CLI: `--visible-chars N` |
+| `view.hide` | `RELAY_BACKPORT_VIEW_HIDE` | — | Pubkey prefixes omitted from `thread +N` / `show` catch-up. CLI: `--hide PREFIX` (repeatable, appended) |
+| `channels` | — | — | uuid → purpose string for the `claude-code` view; a miss prints `?` |
+| `identities` | — | — | pubkey → display label for the `claude-code` view; a miss prints `?` |
 | `webhook.thread_context` | `RELAY_BACKPORT_WEBHOOK_THREAD_CONTEXT` | `delta` | `cumulative` also carries every thread-context block the session has seen and every mention already delivered in it |
 | `webhook.cumulative_max_chars` | `RELAY_BACKPORT_WEBHOOK_CUMULATIVE_MAX_CHARS` | `32000` | Bound on `thread_context_cumulative`; oldest entries dropped first |
 | `webhook.url` | `RELAY_BACKPORT_WEBHOOK_URL` | — | Required for the webhook sink |
@@ -368,7 +413,7 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 
 Buzz's own variables (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, …) are not sink configuration: `BUZZ_RELAY_URL` is copied into payloads as `relay` and, when receipts are on, is the publish target; the key is registered with the log redactor at startup and is read only to sign a receipt. An API token is never read.
 
-CLI: `relay-backport run [--config PATH] [--dry-run] [--observe]` · `relay-backport [acp] [--config PATH] [--sink NAME]… [--file PATH] [--state-dir PATH] [--log-format FMT] [--verbose]` · `relay-backport tail [--file PATH] [--cursor PATH | --no-cursor] [--lines N] [--no-follow] [--config PATH]` · `relay-backport observe [--port N] [--buffer N] [--bind ADDR]` · `--help` · `--version`. Exit codes: `0` ok, `1` configuration or usage.
+CLI: `relay-backport run [--config PATH] [--dry-run] [--observe]` · `relay-backport [acp] [--config PATH] [--sink NAME]… [--file PATH] [--state-dir PATH] [--log-format FMT] [--verbose]` · `relay-backport tail [--file PATH] [--cursor PATH | --no-cursor] [--lines N] [--no-follow] [--view NAME] [--visible-chars N] [--hide PREFIX]… [--config PATH]` · `relay-backport show [--last | --id PREFIX] [--hide PREFIX]… [--raw] [--file PATH]` · `relay-backport observe [--port N] [--buffer N] [--bind ADDR]` · `--help` · `--version`. Exit codes: `0` ok, `1` configuration or usage.
 
 ## Sinks
 
@@ -456,7 +501,7 @@ bun run build            # dist/relay-backport-{linux-x64,darwin-arm64,windows-x
 RELAY_BACKPORT_BIN=$PWD/dist/relay-backport-darwin-arm64 bun test test/binary.test.ts
 ```
 
-Layout: `src/cli.ts` · `src/config.ts` · `src/acp-server.ts` (JSON-RPC server) · `src/prompt.ts` (prompt → event) · `src/delivery.ts` (record, `MENTION|` line, payload) · `src/sinks/{file,webhook,exec}.ts` · `src/receipt.ts` (optional kind:7 delivery receipt) · `src/tail.ts` (follower + line cursor) · `src/run.ts` (the launcher) · `src/thread-context.ts` (the cumulative ledger) · `src/observe.ts` (the loopback page) · `src/log.ts` · `test/` · `deploy/` · `docs/` · `.github/workflows/` · `CHANGELOG.md`.
+Layout: `src/cli.ts` · `src/config.ts` · `src/acp-server.ts` (JSON-RPC server) · `src/prompt.ts` (prompt → event) · `src/delivery.ts` (record, `MENTION|` line, payload) · `src/sinks/{file,webhook,exec}.ts` · `src/receipt.ts` (optional kind:7 delivery receipt) · `src/tail.ts` (follower + line cursor) · `src/view.ts` (`claude-code` projection) · `src/show.ts` (local-file reader) · `src/run.ts` (the launcher) · `src/thread-context.ts` (the cumulative ledger) · `src/observe.ts` (the loopback page) · `src/log.ts` · `test/` · `deploy/` · `docs/` · `.github/workflows/` · `CHANGELOG.md`.
 
 ## License
 

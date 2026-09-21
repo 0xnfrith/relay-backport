@@ -43,6 +43,8 @@ describe("config loading", () => {
     expect(cfg.webhook).toBeUndefined();
     expect(cfg.exec).toBeUndefined();
     expect(cfg.receipt).toEqual({ enabled: false, reaction: "👀", timeoutMs: 4000, maxSeen: 5000 });
+    expect(cfg.file?.promptFields).toBe(false);
+    expect(cfg.view).toEqual({ name: "raw", visibleChars: 500, hide: [] });
   });
 
   test("state dir: XDG_STATE_HOME wins on POSIX, LOCALAPPDATA on Windows", () => {
@@ -56,7 +58,10 @@ describe("config loading", () => {
     expect(cfg.stateDir).toBe("/var/lib/rb");
     expect(cfg.sinks).toEqual(["file", "webhook", "exec"]);
     expect(cfg.deliveryWaitMs).toBe(2500);
-    expect(cfg.file).toEqual({ path: "/var/log/rb/deliveries.jsonl", systemPrompt: true, buzzEnvFile: undefined, contentMaxChars: 0, threadContext: "cumulative", threadContextMaxChars: 32_000 });
+    expect(cfg.file).toEqual({ path: "/var/log/rb/deliveries.jsonl", systemPrompt: true, buzzEnvFile: undefined, contentMaxChars: 0, threadContext: "cumulative", threadContextMaxChars: 32_000, promptFields: false });
+    expect(cfg.view).toEqual({ name: "raw", visibleChars: 500, hide: [] });
+    expect(cfg.channels).toEqual({});
+    expect(cfg.identities).toEqual({});
     expect(cfg.webhook).toEqual({ url: "https://hooks.example.com/x", bearerFile: undefined, timeoutMs: 1234, attempts: 3, includeSystemPrompt: true, threadContext: "delta", cumulativeMaxChars: 32_000 });
     expect(cfg.exec).toEqual({ command: ["/usr/local/bin/handle", "--from-relay"], timeoutMs: 60_000, passBuzzEnv: true, includeSystemPrompt: false });
     expect(cfg.configPath).toBe("/etc/rb.toml");
@@ -204,7 +209,7 @@ include_system_prompt = true
 `
           : readFile(p),
     });
-    expect(cfg.file).toEqual({ path: cfg.file!.path, systemPrompt: false, buzzEnvFile: "/s/buzz.env", contentMaxChars: 0, threadContext: "cumulative", threadContextMaxChars: 32_000 });
+    expect(cfg.file).toEqual({ path: cfg.file!.path, systemPrompt: false, buzzEnvFile: "/s/buzz.env", contentMaxChars: 0, threadContext: "cumulative", threadContextMaxChars: 32_000, promptFields: false });
     expect(cfg.webhook?.includeSystemPrompt).toBe(false);
     expect(cfg.exec?.includeSystemPrompt).toBe(true);
   });
@@ -237,5 +242,49 @@ max_seen = 50
     });
     expect(cfg.receipt).toEqual({ enabled: true, reaction: "👍", timeoutMs: 2500, maxSeen: 50 });
     expect(describeConfig(cfg).receipt).toEqual({ enabled: true, reaction: "👍", timeout_ms: 2500, max_seen: 50 });
+  });
+
+  test("views, prompt_fields, channels and identities default off; TOML and env turn them on", () => {
+    const fromToml = loadConfig({
+      configPath: "/etc/view.toml",
+      env: {},
+      readFile: (p) =>
+        p === "/etc/view.toml"
+          ? `
+[file]
+prompt_fields = true
+
+[view]
+name = "claude-code"
+visible_chars = 400
+hide = ["aa", "bb"]
+
+[channels]
+"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" = "general / community"
+
+[identities]
+"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef" = "Alice"
+`
+          : readFile(p),
+    });
+    expect(fromToml.file?.promptFields).toBe(true);
+    expect(fromToml.view).toEqual({ name: "claude-code", visibleChars: 400, hide: ["aa", "bb"] });
+    expect(fromToml.channels["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]).toBe("general / community");
+    expect(fromToml.identities["1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]).toBe("Alice");
+
+    const fromEnv = loadConfig({
+      env: {
+        HOME: "/home/u",
+        RELAY_BACKPORT_FILE_PROMPT_FIELDS: "true",
+        RELAY_BACKPORT_VIEW: "claude-code",
+        RELAY_BACKPORT_VIEW_VISIBLE_CHARS: "320",
+        RELAY_BACKPORT_VIEW_HIDE: "c371,5221",
+      },
+      readFile,
+    });
+    expect(fromEnv.file?.promptFields).toBe(true);
+    expect(fromEnv.view).toEqual({ name: "claude-code", visibleChars: 320, hide: ["c371", "5221"] });
+    expect(() => loadConfig({ env: { HOME: "/home/u", RELAY_BACKPORT_VIEW: "webhook" }, readFile })).toThrow(/view.name/);
+    expect(() => loadConfig({ env: { HOME: "/home/u", RELAY_BACKPORT_VIEW_VISIBLE_CHARS: "0" }, readFile })).toThrow(/view.visible_chars/);
   });
 });

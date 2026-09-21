@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { registerSecret, type LogFormat } from "./log";
+import { DEFAULT_VISIBLE_CHARS, VIEW_NAMES, type ViewName } from "./view";
 
 export const SINK_NAMES = ["file", "webhook", "exec"] as const;
 export type SinkName = (typeof SINK_NAMES)[number];
@@ -31,6 +32,9 @@ export const DEFAULT_RECEIPT_MAX_SEEN = 5000;
 export const DEFAULT_CUMULATIVE_MAX_CHARS = 32_000;
 export const DEFAULT_FILE_THREAD_CONTEXT: "none" | "new" | "cumulative" = "cumulative";
 export const DEFAULT_FILE_THREAD_CONTEXT_MAX_CHARS = 32_000;
+export const DEFAULT_FILE_PROMPT_FIELDS = false;
+export const DEFAULT_VIEW_NAME: ViewName = "raw";
+export const DEFAULT_VIEW_VISIBLE_CHARS = DEFAULT_VISIBLE_CHARS;
 export const DEFAULT_BUZZ_ACP_BIN = "buzz-acp";
 export const DEFAULT_SESSION_TITLE = "relay-backport-ears";
 export const DEFAULT_SESSION_POLICY = "thread";
@@ -63,6 +67,19 @@ export type FileConfig = {
   threadContext: "none" | "new" | "cumulative";
   /** Bound on the whole `thread_context` block; oldest entries dropped first. 0 = unlimited. */
   threadContextMaxChars: number;
+  /**
+   * Append prompt-header words (`channel_name`, `scope`, …) to the `MENTION|`
+   * JSON. Off by default: extra keys change the bytes, so the v0.1
+   * byte-identical promise needs this switch.
+   */
+  promptFields: boolean;
+};
+
+/** A named projection `tail` applies on the way out. Default `raw` = the stored line. */
+export type ViewConfig = {
+  name: ViewName;
+  visibleChars: number;
+  hide: string[];
 };
 
 export type WebhookConfig = {
@@ -141,6 +158,11 @@ export type Config = {
   exec?: ExecConfig;
   receipt: ReceiptConfig;
   run: RunConfig;
+  view: ViewConfig;
+  /** Channel uuid → purpose string. Used by the `claude-code` view; a miss prints `?`. */
+  channels: Record<string, string>;
+  /** Pubkey → display label. Used by the `claude-code` view; a miss prints `?`. */
+  identities: Record<string, string>;
   /** Where the config file came from, for logs. */
   configPath?: string;
 };
@@ -158,7 +180,15 @@ export type RawConfig = {
     content_max_chars?: number | string;
     thread_context?: string;
     thread_context_max_chars?: number | string;
+    prompt_fields?: boolean | string;
   };
+  view?: {
+    name?: string;
+    visible_chars?: number | string;
+    hide?: string[] | string;
+  };
+  channels?: Record<string, string>;
+  identities?: Record<string, string>;
   webhook?: {
     url?: string;
     bearer_file?: string;
@@ -233,13 +263,15 @@ export function rawFromEnv(env: EnvMap): RawConfig {
   const fileContentMaxChars = get("FILE_CONTENT_MAX_CHARS");
   const fileThreadContext = get("FILE_THREAD_CONTEXT");
   const fileThreadContextMaxChars = get("FILE_THREAD_CONTEXT_MAX_CHARS");
+  const filePromptFields = get("FILE_PROMPT_FIELDS");
   if (
     file ||
     fileSystemPrompt !== undefined ||
     fileBuzzEnvFile ||
     fileContentMaxChars !== undefined ||
     fileThreadContext !== undefined ||
-    fileThreadContextMaxChars !== undefined
+    fileThreadContextMaxChars !== undefined ||
+    filePromptFields !== undefined
   ) {
     raw.file = {};
     if (file) raw.file.path = file;
@@ -248,6 +280,16 @@ export function rawFromEnv(env: EnvMap): RawConfig {
     if (fileContentMaxChars !== undefined) raw.file.content_max_chars = fileContentMaxChars;
     if (fileThreadContext !== undefined) raw.file.thread_context = fileThreadContext;
     if (fileThreadContextMaxChars !== undefined) raw.file.thread_context_max_chars = fileThreadContextMaxChars;
+    if (filePromptFields !== undefined) raw.file.prompt_fields = filePromptFields;
+  }
+  const viewName = get("VIEW");
+  const viewVisible = get("VIEW_VISIBLE_CHARS");
+  const viewHide = get("VIEW_HIDE");
+  if (viewName !== undefined || viewVisible !== undefined || viewHide !== undefined) {
+    raw.view = {};
+    if (viewName !== undefined) raw.view.name = viewName;
+    if (viewVisible !== undefined) raw.view.visible_chars = viewVisible;
+    if (viewHide !== undefined) raw.view.hide = viewHide;
   }
   const url = get("WEBHOOK_URL");
   const bearer = get("WEBHOOK_BEARER_FILE");
@@ -315,6 +357,14 @@ function mergeRaw(base: RawConfig, over: RawConfig): RawConfig {
   if (base.exec || over.exec) out.exec = { ...(base.exec ?? {}), ...(over.exec ?? {}) };
   if (base.receipt || over.receipt) out.receipt = { ...(base.receipt ?? {}), ...(over.receipt ?? {}) };
   if (base.run || over.run) out.run = { ...(base.run ?? {}), ...(over.run ?? {}) };
+  if (base.view || over.view) {
+    out.view = { ...(base.view ?? {}), ...(over.view ?? {}) };
+    if (base.view?.hide !== undefined || over.view?.hide !== undefined) {
+      out.view.hide = [...(toList(base.view?.hide) ?? []), ...(toList(over.view?.hide) ?? [])];
+    }
+  }
+  if (base.channels || over.channels) out.channels = { ...(base.channels ?? {}), ...(over.channels ?? {}) };
+  if (base.identities || over.identities) out.identities = { ...(base.identities ?? {}), ...(over.identities ?? {}) };
   return out;
 }
 
@@ -356,6 +406,25 @@ function parseFileThreadContext(v: string | undefined): "none" | "new" | "cumula
   const s = (v ?? DEFAULT_FILE_THREAD_CONTEXT).trim().toLowerCase();
   if (s === "none" || s === "new" || s === "cumulative") return s;
   throw new ConfigError('file.thread_context must be "none", "new" or "cumulative"');
+}
+
+function parseViewName(v: string | undefined): ViewName {
+  const s = (v ?? DEFAULT_VIEW_NAME).trim().toLowerCase();
+  if (s === "" || s === "raw") return "raw";
+  if ((VIEW_NAMES as readonly string[]).includes(s)) return s as ViewName;
+  throw new ConfigError(`view.name must be one of ${VIEW_NAMES.join(", ")}`);
+}
+
+function parseStringMap(v: Record<string, string> | undefined): Record<string, string> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (typeof val !== "string") continue;
+    const key = k.trim().toLowerCase();
+    const value = val.trim();
+    if (key && value) out[key] = value;
+  }
+  return out;
 }
 
 function parseThreadContext(v: string | undefined): "delta" | "cumulative" {
@@ -431,6 +500,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       contentMaxChars: toInt(raw.file?.content_max_chars, DEFAULT_FILE_CONTENT_MAX_CHARS, "file.content_max_chars", 0),
       threadContext: parseFileThreadContext(raw.file?.thread_context),
       threadContextMaxChars: toInt(raw.file?.thread_context_max_chars, DEFAULT_FILE_THREAD_CONTEXT_MAX_CHARS, "file.thread_context_max_chars", 0),
+      promptFields: toBool(raw.file?.prompt_fields, DEFAULT_FILE_PROMPT_FIELDS, "file.prompt_fields"),
     };
   }
 
@@ -491,6 +561,12 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     observeIngestUrl: runRaw.observe_ingest_url?.trim() || DEFAULT_OBSERVE_INGEST_URL,
   };
 
+  const view: ViewConfig = {
+    name: parseViewName(raw.view?.name),
+    visibleChars: toInt(raw.view?.visible_chars, DEFAULT_VIEW_VISIBLE_CHARS, "view.visible_chars", 1),
+    hide: (toList(raw.view?.hide) ?? []).map((s) => s.toLowerCase()),
+  };
+
   return {
     stateDir,
     sinks,
@@ -502,6 +578,9 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     exec,
     receipt,
     run,
+    view,
+    channels: parseStringMap(raw.channels),
+    identities: parseStringMap(raw.identities),
     configPath,
   };
 }
@@ -521,6 +600,7 @@ export function describeConfig(cfg: Config): Record<string, unknown> {
           content_max_chars: cfg.file.contentMaxChars,
           thread_context: cfg.file.threadContext,
           thread_context_max_chars: cfg.file.threadContextMaxChars,
+          prompt_fields: cfg.file.promptFields,
         }
       : null,
     webhook: cfg.webhook
@@ -535,6 +615,9 @@ export function describeConfig(cfg: Config): Record<string, unknown> {
     exec: cfg.exec ? { command: cfg.exec.command, timeout_ms: cfg.exec.timeoutMs, pass_buzz_env: cfg.exec.passBuzzEnv, include_system_prompt: cfg.exec.includeSystemPrompt } : null,
     receipt: { enabled: cfg.receipt.enabled, reaction: cfg.receipt.reaction, timeout_ms: cfg.receipt.timeoutMs, max_seen: cfg.receipt.maxSeen },
     run: { buzz_acp: cfg.run.buzzAcp, key_file: cfg.run.keyFile || null, session_title: cfg.run.sessionTitle, allowlist: cfg.run.allowlist.length, allowlist_file: cfg.run.allowlistFile ?? null },
+    view: { name: cfg.view.name, visible_chars: cfg.view.visibleChars, hide: cfg.view.hide.length },
+    channels: Object.keys(cfg.channels).length,
+    identities: Object.keys(cfg.identities).length,
     config: cfg.configPath ?? null,
   };
 }

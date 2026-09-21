@@ -35,6 +35,12 @@ describe("argument parsing", () => {
     expect(parseArgs(["-h"]).flags.help).toBe(true);
     expect(parseArgs(["-v"]).flags.version).toBe(true);
     expect(parseArgs(["tail", "--no-thread"]).flags["no-thread"]).toBe(true);
+    expect(parseArgs(["tail", "--view", "claude-code", "--visible-chars", "400", "--hide", "aa", "--hide", "bb"]).flags).toMatchObject({
+      view: "claude-code",
+      "visible-chars": "400",
+      hide: ["aa", "bb"],
+    });
+    expect(parseArgs(["show", "--last", "--raw", "--id", "abc"]).flags).toMatchObject({ last: true, raw: true, id: "abc" });
     expect(overridesFromFlags(parseArgs(["--file-thread-context", "new", "--file-thread-context-max-chars", "10"]).flags).file).toEqual({
       thread_context: "new",
       thread_context_max_chars: "10",
@@ -57,6 +63,8 @@ describe("main", () => {
     expect(await main(["--help"], h)).toBe(0);
     expect(h.outLines[0]).toBe(HELP.trimEnd());
     expect(HELP).toContain("relay-backport tail");
+    expect(HELP).toContain("relay-backport show");
+    expect(HELP).toContain("--view");
     expect(HELP).toContain("--no-cursor");
     const v = io();
     expect(await main(["--version"], v)).toBe(0);
@@ -198,6 +206,65 @@ describe("main", () => {
     expect(await ingest.json()).toEqual({ ok: true, seq: 1 });
     ctl.abort();
     expect(await run).toBe(0);
+  });
+
+  test("tail --view claude-code prints WAKE and TEXT in one write and still advances the cursor by one record", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const file = join(t.dir, "deliveries.jsonl");
+    const id = "b".repeat(64);
+    const mention = `MENTION|${JSON.stringify({ kind: 9, from: "12345678", h: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", content: "hello", id, tags: [] })}`;
+    writeFileSync(file, `EVENT|session|new|s1\n${mention}\n`);
+
+    const c = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["tail", "--no-follow", "--view", "claude-code"], c)).toBe(0);
+    expect(c.outLines).toContain("EVENT|session|new|s1");
+    // one write per file record: the MENTION becomes two lines inside a single out() call
+    const projected = c.outLines.find((l) => l.includes("\nTEXT | "));
+    expect(projected).toBeDefined();
+    expect(projected!.startsWith("WAKE mention |")).toBe(true);
+    expect(projected!.split("\n")).toHaveLength(2);
+    expect(await Bun.file(join(t.dir, "tail.cursor")).text()).toBe("2\n");
+  });
+
+  test("show prints the last mention; --id refuses an ambiguous prefix; --raw is the stored line", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const file = join(t.dir, "deliveries.jsonl");
+    const a = "aa" + "1".repeat(62);
+    const b = "aa" + "2".repeat(62);
+    const c = "bb" + "3".repeat(62);
+    writeFileSync(
+      file,
+      `MENTION|${JSON.stringify({ kind: 9, from: "1", h: "h", content: "first", id: a, tags: [] })}\n` +
+        `MENTION|${JSON.stringify({ kind: 9, from: "1", h: "h", content: "second", id: b, tags: [] })}\n` +
+        `MENTION|${JSON.stringify({ kind: 9, from: "1", h: "h", content: "third", id: c, tags: [] })}\n`,
+    );
+    const last = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["show", "--last"], last)).toBe(0);
+    expect(last.outLines[0]).toContain("third");
+    expect(last.outLines[0]).toContain(c);
+
+    const raw = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["show", "--raw"], raw)).toBe(0);
+    expect(raw.outLines[0]!.startsWith("MENTION|")).toBe(true);
+    expect(raw.outLines[0]).toContain(c);
+
+    const amb = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["show", "--id", "aa"], amb)).toBe(1);
+    expect(amb.errLines[0]).toContain("matches 2 records");
+
+    const one = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["show", "--id", b.slice(0, 12)], one)).toBe(0);
+    expect(one.outLines[0]).toContain("second");
+
+    const both = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["show", "--last", "--id", "bb"], both)).toBe(1);
+    expect(both.errLines[0]).toContain("--last and --id");
+
+    const viewThread = io({ RELAY_BACKPORT_STATE_DIR: t.dir });
+    expect(await main(["tail", "--view", "claude-code", "--no-thread"], viewThread)).toBe(1);
+    expect(viewThread.errLines[0]).toContain("--view and --no-thread");
   });
 
   test("observe rejects a non-numeric or out-of-range --port / --buffer", async () => {

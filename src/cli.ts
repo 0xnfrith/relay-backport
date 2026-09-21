@@ -16,8 +16,10 @@ import { DEFAULT_BIND, DEFAULT_BUFFER, DEFAULT_PORT, startObserveServer } from "
 import { Receipts } from "./receipt";
 import { buildSinks } from "./sinks/index";
 import { buildPlan, pgrepSessionTitle, preflight, probeUrl, renderPlan, runHarness } from "./run";
+import { ShowError, showDeliveries } from "./show";
 import { stripThreadContext, tailFile } from "./tail";
 import { NAME, VERSION } from "./version";
+import { DEFAULT_VISIBLE_CHARS, projectClaudeCode } from "./view";
 import { join, resolve } from "node:path";
 
 export const HELP = `${NAME} ${VERSION}
@@ -28,6 +30,7 @@ USAGE
   ${NAME} [acp] [options]     run the ACP server (what a Buzz harness spawns; the default)
   ${NAME} run [options]       launch buzz-acp with this program as its ACP agent
   ${NAME} tail [options]      follow the file sink and print its MENTION|/EVENT| lines
+  ${NAME} show [options]      print one MENTION record from the local delivery file
   ${NAME} observe [options]   serve a loopback page showing what the agent sees
   ${NAME} --help | --version
 
@@ -65,6 +68,16 @@ OPTIONS (tail)
   --lines N            print the last N lines before following (--no-cursor only; default 0)
   --no-thread          strip thread_context from MENTION lines (for a human watching the wire)
   --no-follow          print and exit
+  --view NAME          raw (default) | claude-code — a named projection of each record
+  --visible-chars N    per-line budget for --view claude-code (default ${DEFAULT_VISIBLE_CHARS})
+  --hide PREFIX        pubkey prefix omitted from the view's thread count (repeatable)
+
+OPTIONS (show)
+  --last               the newest MENTION record (the default)
+  --id PREFIX          the MENTION whose event id starts with PREFIX; errors if ambiguous
+  --hide PREFIX        pubkey prefix whose catch-up entries are omitted (repeatable)
+  --raw                print the untouched record
+  Reads only the local file, never the relay. A partial last line is ignored.
 
 OPTIONS (observe)
   --port N             listen on this port (default ${DEFAULT_PORT}; 0 picks a free one)
@@ -97,9 +110,13 @@ const VALUE_FLAGS = new Set([
   "port",
   "buffer",
   "bind",
+  "view",
+  "visible-chars",
+  "id",
+  "hide",
 ]);
-const BOOL_FLAGS = new Set(["help", "version", "verbose", "no-follow", "no-cursor", "no-thread", "dry-run", "observe"]);
-const REPEATABLE = new Set(["sink"]);
+const BOOL_FLAGS = new Set(["help", "version", "verbose", "no-follow", "no-cursor", "no-thread", "dry-run", "observe", "last", "raw"]);
+const REPEATABLE = new Set(["sink", "hide"]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const flags: Record<string, string | boolean | string[]> = {};
@@ -179,6 +196,16 @@ export function overridesFromFlags(flags: ParsedArgs["flags"]): RawConfig {
   if (Array.isArray(flags.sink)) o.sinks = flags.sink;
   const logFormat = str(flags["log-format"]);
   if (logFormat !== undefined) o.log_format = logFormat;
+  const view = str(flags.view);
+  const visibleChars = str(flags["visible-chars"]);
+  const hide = flags.hide;
+  if (view !== undefined || visibleChars !== undefined || hide !== undefined) {
+    o.view = {};
+    if (view !== undefined) o.view.name = view;
+    if (visibleChars !== undefined) o.view.visible_chars = visibleChars;
+    if (Array.isArray(hide)) o.view.hide = hide;
+    else if (typeof hide === "string") o.view.hide = hide;
+  }
   return o;
 }
 
@@ -302,17 +329,57 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
         }
         const cursorPath = noCursor ? undefined : resolve(cursorFlag ?? join(cfg.stateDir, DEFAULT_TAIL_CURSOR_NAME));
         const noThread = args.flags["no-thread"] === true;
-        log.info("following", { path: cfg.file!.path, cursor: cursorPath ?? null, lines: n, thread_context: !noThread });
+        const viewName = cfg.view.name;
+        if (viewName !== "raw" && noThread) {
+          throw new ConfigError("--view and --no-thread cannot be combined");
+        }
+        log.info("following", {
+          path: cfg.file!.path,
+          cursor: cursorPath ?? null,
+          lines: n,
+          thread_context: !noThread,
+          view: viewName,
+        });
+        const writeLine = (l: string) => {
+          if (viewName === "claude-code") {
+            // Two lines in one write so a Monitor that batches near-simultaneous
+            // lines delivers the header and the text together.
+            io.out(
+              projectClaudeCode(l, {
+                visibleChars: cfg.view.visibleChars,
+                hide: cfg.view.hide,
+                channels: cfg.channels,
+                identities: cfg.identities,
+                owner: cfg.run.owner,
+              }),
+            );
+            return;
+          }
+          io.out(noThread ? stripThreadContext(l) : l);
+        };
         await tailFile({
           path: cfg.file!.path,
-          // Stripping happens here, in the write path: the tail still CONSUMES
-          // every line (and so advances its cursor past it), it just prints less.
-          write: (l) => io.out(noThread ? stripThreadContext(l) : l),
+          // Projection happens here, in the write path: the tail still CONSUMES
+          // every line (and so advances its cursor past it), it just prints a
+          // different shape. One file record = one cursor step, whatever the view.
+          write: writeLine,
           lines: n,
           follow: args.flags["no-follow"] !== true,
           cursorPath,
           signal: io.signal,
         });
+        return 0;
+      }
+      case "show": {
+        const cfg = loadConfig({
+          configPath: str(args.flags.config),
+          env: io.env,
+          overrides: { ...overridesFromFlags(args.flags), sinks: ["file"] },
+        });
+        const last = args.flags.last === true;
+        const id = str(args.flags.id);
+        if (last && id !== undefined) throw new ConfigError("--last and --id cannot be combined");
+        io.out(showDeliveries({ path: cfg.file!.path, id, hide: cfg.view.hide, raw: args.flags.raw === true }));
         return 0;
       }
       case "observe": {
