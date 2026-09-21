@@ -19,7 +19,7 @@ import { buildPlan, pgrepSessionTitle, preflight, probeUrl, renderPlan, runHarne
 import { ShowError, showDeliveries } from "./show";
 import { stripThreadContext, tailFile } from "./tail";
 import { NAME, VERSION } from "./version";
-import { DEFAULT_VISIBLE_CHARS, MIN_VISIBLE_CHARS, projectClaudeCode } from "./view";
+import { DEFAULT_VISIBLE_CHARS, MIN_VISIBLE_CHARS, TitleCache, projectClaudeCode } from "./view";
 import { join, resolve } from "node:path";
 
 export const HELP = `${NAME} ${VERSION}
@@ -340,7 +340,7 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
           thread_context: !noThread,
           view: viewName,
         });
-        const titles = new Map<string, string>();
+        const titles = new TitleCache();
         const writeLine = (l: string) => {
           if (viewName === "claude-code") {
             // Two lines in one write so a Monitor that batches near-simultaneous

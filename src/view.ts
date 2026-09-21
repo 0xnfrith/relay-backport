@@ -41,9 +41,43 @@ export type ClaudeCodeViewOptions = {
   /**
    * Optional root-id → title cache for a long-lived `tail`. When a record
    * reveals the root's text, later records in the same thread reuse it.
+   * Oldest-out, capped at `TITLE_CACHE_CAP`.
    */
-  titles?: Map<string, string>;
+  titles?: TitleCache;
 };
+
+/** Oldest-out bound on the per-tail root→title cache. */
+export const TITLE_CACHE_CAP = 256;
+
+/** Insertion-order map: a new root evicts the oldest once the cap is hit. */
+export class TitleCache {
+  private readonly map = new Map<string, string>();
+
+  get size(): number {
+    return this.map.size;
+  }
+
+  get(id: string): string | undefined {
+    return this.map.get(id);
+  }
+
+  set(id: string, title: string): void {
+    if (this.map.has(id)) {
+      this.map.set(id, title);
+      return;
+    }
+    while (this.map.size >= TITLE_CACHE_CAP) {
+      const oldest = this.map.keys().next().value;
+      if (oldest === undefined) break;
+      this.map.delete(oldest);
+    }
+    this.map.set(id, title);
+  }
+
+  has(id: string): boolean {
+    return this.map.has(id);
+  }
+}
 
 export function clip(s: string, max: number): string {
   if (max <= 0 || s.length <= max) return max <= 0 ? "" : s;
@@ -247,24 +281,18 @@ function deliveredEventBody(text: string): string {
   return m ? m[1]! : text;
 }
 
-function entryIsRoot(rec: ThreadContextEntry, rootId: string): boolean {
-  const eid = typeof rec.event_id === "string" ? rec.event_id.toLowerCase() : "";
-  const text = typeof rec.text === "string" ? rec.text : "";
-  // Block entries are keyed by the prompt that *carried* the block, not by
-  // a message inside it — matching those would pick the wrong text.
-  if (rec.kind === "block") return text.toLowerCase().includes(`event ${rootId}`);
-  return eid === rootId || text.toLowerCase().includes(`event ${rootId}`);
-}
-
 /**
- * Title of the thread: the root message's text, and only that. Looked up by
- * id on this record (if this event *is* the root) or in catch-up event
- * entries. A miss returns undefined so the header prints `(thread)` with no
- * quoted title — never another entry's opening words.
+ * Title of the thread: the root message's text, and only that. Two
+ * structured sources, never prose:
+ *   (a) this record's own `id` equals the root id — the title is its content;
+ *   (b) a catch-up entry of kind `event` whose `event_id` field equals the root.
+ * A `block` entry has no per-message id that can be checked, so it is never
+ * a title. A miss returns undefined so the header prints `(thread)` with no
+ * quoted title.
  */
 export function threadTitleFromRoot(
   obj: Pick<MentionLine, "id" | "content" | "reply_to" | "tags" | "thread_context">,
-  titles?: Map<string, string>,
+  titles?: TitleCache,
 ): string | undefined {
   const rootId = threadRootId(obj);
   if (!rootId) return undefined;
@@ -275,7 +303,9 @@ export function threadTitleFromRoot(
     for (const item of obj.thread_context) {
       if (!item || typeof item !== "object" || Array.isArray(item)) continue;
       const rec = item as ThreadContextEntry;
-      if (typeof rec.text !== "string" || !entryIsRoot(rec, rootId)) continue;
+      if (rec.kind !== "event") continue;
+      const eid = typeof rec.event_id === "string" ? rec.event_id.toLowerCase() : "";
+      if (eid !== rootId || typeof rec.text !== "string") continue;
       const body = deliveredEventBody(rec.text);
       if (body.trim()) {
         raw = body;
