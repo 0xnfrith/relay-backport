@@ -127,8 +127,13 @@ export type ReceiptConfig = {
 export type RunConfig = {
   /** The `buzz-acp` binary: a path, or a bare name looked up on PATH. */
   buzzAcp: string;
-  /** The file holding the agent's private key. Its bytes go to the child's env and nowhere else. */
+  /** The file holding the agent's private key. Empty when `keyCommand` is set. */
   keyFile: string;
+  /**
+   * Argv run with no shell; trimmed stdout is the key. Empty when `keyFile` is set.
+   * Executed once, after preflight, and never under `--dry-run`.
+   */
+  keyCommand: string[];
   /** `BUZZ_RELAY_URL` for the child. */
   relayUrl: string;
   /** `BUZZ_ACP_AGENT_OWNER`, when there is one. */
@@ -203,6 +208,8 @@ export type RawConfig = {
   run?: {
     buzz_acp?: string;
     key_file?: string;
+    /** Argv array in a file; a whitespace-separated string in the environment. */
+    key_command?: string[] | string;
     relay_url?: string;
     owner?: string;
     allowlist?: string[] | string;
@@ -337,6 +344,7 @@ export function rawFromEnv(env: EnvMap): RawConfig {
   };
   runGet("BUZZ_ACP", "buzz_acp");
   runGet("KEY_FILE", "key_file");
+  runGet("KEY_COMMAND", "key_command");
   runGet("RELAY_URL", "relay_url");
   runGet("OWNER", "owner");
   runGet("ALLOWLIST", "allowlist");
@@ -555,12 +563,18 @@ export function loadConfig(opts: LoadOptions = {}): Config {
   };
 
   const runRaw = raw.run ?? {};
+  const keyFile = runRaw.key_file?.trim() ? resolve(runRaw.key_file.trim()) : "";
+  const keyCommand = (toCommand(runRaw.key_command) ?? []).map((s) => s.trim()).filter(Boolean);
+  if (keyFile && keyCommand.length > 0) {
+    throw new ConfigError("run.key_file and run.key_command are mutually exclusive; set only one");
+  }
   const run: RunConfig = {
     // BUZZ_ACP_BIN is Buzz's own variable name, so it is read unprefixed —
     // this is the one place relay-backport reads a non-RELAY_BACKPORT_ setting
     // that is not injected by the harness.
     buzzAcp: runRaw.buzz_acp?.trim() || trimEnv(env.BUZZ_ACP_BIN) || DEFAULT_BUZZ_ACP_BIN,
-    keyFile: runRaw.key_file?.trim() ? resolve(runRaw.key_file.trim()) : "",
+    keyFile,
+    keyCommand,
     relayUrl: runRaw.relay_url?.trim() || trimEnv(env.BUZZ_RELAY_URL) || "",
     owner: runRaw.owner?.trim() || undefined,
     allowlist: toList(runRaw.allowlist) ?? [],
@@ -625,7 +639,15 @@ export function describeConfig(cfg: Config): Record<string, unknown> {
       : null,
     exec: cfg.exec ? { command: cfg.exec.command, timeout_ms: cfg.exec.timeoutMs, pass_buzz_env: cfg.exec.passBuzzEnv, include_system_prompt: cfg.exec.includeSystemPrompt } : null,
     receipt: { enabled: cfg.receipt.enabled, reaction: cfg.receipt.reaction, timeout_ms: cfg.receipt.timeoutMs, max_seen: cfg.receipt.maxSeen },
-    run: { buzz_acp: cfg.run.buzzAcp, key_file: cfg.run.keyFile || null, session_title: cfg.run.sessionTitle, allowlist: cfg.run.allowlist.length, allowlist_file: cfg.run.allowlistFile ?? null },
+    run: {
+      buzz_acp: cfg.run.buzzAcp,
+      key_file: cfg.run.keyFile || null,
+      // argv[0] only. The rest of the argv can name a secret and is not logged.
+      key_command: cfg.run.keyCommand[0] ?? null,
+      session_title: cfg.run.sessionTitle,
+      allowlist: cfg.run.allowlist.length,
+      allowlist_file: cfg.run.allowlistFile ?? null,
+    },
     view: { name: cfg.view.name, visible_chars: cfg.view.visibleChars, hide: cfg.view.hide.length },
     channels: Object.keys(cfg.channels).length,
     identities: Object.keys(cfg.identities).length,

@@ -56,10 +56,10 @@ OPTIONS (acp)
   No relay URL or key: the harness that spawned this process owns them.
 
 OPTIONS (run)
-  --dry-run            preflight, print the plan with the key redacted, and exit; reads no key
+  --dry-run            preflight, print the plan with the key redacted, and exit; reads no key, runs no key command
   --observe            add the webhook sink and point it at the local observe page
-  The key comes from run.key_file and reaches the child's ${"BUZZ_PRIVATE_KEY"} only —
-  never a command line, never a log line, never the printed plan.
+  The key comes from run.key_file or run.key_command (one of them) and reaches the
+  child's ${"BUZZ_PRIVATE_KEY"} only — never a command line, never a log line, never the printed plan.
 
 OPTIONS (tail)
   --cursor PATH        the line cursor (default STATE_DIR/${DEFAULT_TAIL_CURSOR_NAME}); on by default, so a
@@ -275,7 +275,9 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
       case "run": {
         const cfg = loadConfig({ configPath: str(args.flags.config), env: io.env, overrides: overridesFromFlags(args.flags) });
         configureLog({ format: cfg.logFormat, level: args.flags.verbose === true ? "debug" : "info" });
-        if (!cfg.run.keyFile) throw new ConfigError("run needs run.key_file (RELAY_BACKPORT_RUN_KEY_FILE)");
+        if (!cfg.run.keyFile && cfg.run.keyCommand.length === 0) {
+          throw new ConfigError("run needs run.key_file (RELAY_BACKPORT_RUN_KEY_FILE) or run.key_command (RELAY_BACKPORT_RUN_KEY_COMMAND)");
+        }
         const observe = args.flags.observe === true;
         const dryRun = args.flags["dry-run"] === true;
         const plan = buildPlan({
@@ -309,7 +311,6 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
           io.out("  --dry-run: stopping here. Nothing started, no key read.");
           return 0;
         }
-        io.out(`EARS UP — this terminal is the daemon. Ctrl-C stops it.`);
         return await runHarness({ plan, run: cfg.run, stateDir: cfg.stateDir, env: io.env, out: io.out, signal: io.signal });
       }
       case "tail": {
