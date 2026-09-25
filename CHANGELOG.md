@@ -2,6 +2,14 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.6.0 — 2026-09-25
+
+the harness key can come from a command instead of a file
+
+### Added
+
+- **`run.key_command`** (`RELAY_BACKPORT_RUN_KEY_COMMAND`). An argv array, run without a shell, once, after preflight, and never under `--dry-run`. Stdout, trimmed, must be a 64-hex secret key or an `nsec1…`. A non-zero exit, empty output, a format that does not match, or a 30s timeout starts nothing, and the error never includes the command's output. The key still reaches the child only as `BUZZ_PRIVATE_KEY`. Mutually exclusive with `run.key_file`. Preflight checks that the program exists and is executable (a bare name is resolved on `PATH`) and does not run it. The plan line is `<from key_command: argv[0]>`.
+
 ## 0.5.0 — 2026-09-21
 
 named views on `tail`, and `show` — both off by default

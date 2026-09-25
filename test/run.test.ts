@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { main } from "../src/cli";
-import { loadConfig } from "../src/config";
+import { describeConfig, loadConfig } from "../src/config";
 import {
   buildPlan,
   httpsFromRelay,
+  isHarnessKey,
+  KEY_COMMAND_TIMEOUT_MS,
   KEY_ENV,
   mergeAllowlist,
   preflight,
   pubkeysFromStore,
+  readKeyFromCommand,
   renderPlan,
   resolveBinary,
   runHarness,
@@ -43,14 +46,22 @@ function fakeBinary(dir: string, name = "buzz-acp"): string {
   return p;
 }
 
+function writeExec(dir: string, name: string, body: string): string {
+  const p = join(dir, name);
+  writeFileSync(p, body, { mode: 0o755 });
+  chmodSync(p, 0o755);
+  return p;
+}
+
 function runConfig(dir: string, extra: Record<string, unknown> = {}) {
+  const useCommand = Object.prototype.hasOwnProperty.call(extra, "key_command");
   const cfg = loadConfig({
     env: {},
     overrides: {
       state_dir: dir,
       run: {
         buzz_acp: fakeBinary(dir),
-        key_file: keyFile(dir),
+        ...(useCommand ? {} : { key_file: keyFile(dir) }),
         relay_url: "wss://relay.example",
         owner: ALICE,
         allowlist: [ALICE, BOB],
@@ -59,6 +70,12 @@ function runConfig(dir: string, extra: Record<string, unknown> = {}) {
     },
   });
   return cfg;
+}
+
+function io(env: Record<string, string | undefined> = {}) {
+  const outLines: string[] = [];
+  const errLines: string[] = [];
+  return { out: (s: string) => outLines.push(s), err: (s: string) => errLines.push(s), env, outLines, errLines };
 }
 
 describe("run: helpers", () => {
@@ -278,12 +295,6 @@ describe("run: preflight", () => {
 });
 
 describe("run: the CLI", () => {
-  function io(env: Record<string, string | undefined> = {}) {
-    const outLines: string[] = [];
-    const errLines: string[] = [];
-    return { out: (s: string) => outLines.push(s), err: (s: string) => errLines.push(s), env, outLines, errLines };
-  }
-
   test("--dry-run preflights, prints the plan, starts nothing and never prints the key", async () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);
@@ -340,10 +351,11 @@ describe("run: the CLI", () => {
     expect(text).toContain(`RELAY_BACKPORT_CONFIG`);
   });
 
-  test("run without run.key_file is a usage error", async () => {
+  test("run without run.key_file or run.key_command is a usage error naming both", async () => {
     const c = io();
     expect(await main(["run"], c)).toBe(1);
     expect(c.errLines[0]).toContain("run.key_file");
+    expect(c.errLines[0]).toContain("run.key_command");
   });
 
   test("runHarness puts the key in the child's environment and nowhere else", async () => {
@@ -369,5 +381,261 @@ describe("run: the CLI", () => {
     expect(seen!.command).not.toContain(SECRET);
     // the parent's environment is inherited, not replaced
     expect(seen!.env.HOME).toBe(t.dir);
+  });
+});
+
+describe("run: key command", () => {
+  const planOf = (dir: string, extra: Record<string, unknown> = {}, env: Record<string, string | undefined> = {}) => {
+    const cfg = runConfig(dir, extra);
+    return {
+      cfg,
+      plan: buildPlan({ run: cfg.run, stateDir: cfg.stateDir, sinks: cfg.sinks, observe: false, env, execPath: "/b", mainPath: "/m" }),
+    };
+  };
+
+  test("a 64-hex string and an nsec1… pass the format check; anything else does not", () => {
+    expect(KEY_COMMAND_TIMEOUT_MS).toBe(30_000);
+    expect(isHarnessKey(SECRET)).toBe(true);
+    expect(isHarnessKey(`nsec1${"q".repeat(58)}`)).toBe(true);
+    expect(isHarnessKey("not-a-key")).toBe(false);
+    expect(isHarnessKey(`nsec1${"I".repeat(40)}`)).toBe(false);
+    expect(isHarnessKey(`${SECRET}\n`)).toBe(false);
+  });
+
+  test("RELAY_BACKPORT_RUN_KEY_COMMAND is an argv array and describeConfig logs only argv[0]", () => {
+    const cfg = loadConfig({
+      env: { RELAY_BACKPORT_RUN_KEY_COMMAND: "op read op://vault/item/credential" },
+    });
+    expect(cfg.run.keyCommand).toEqual(["op", "read", "op://vault/item/credential"]);
+    expect(cfg.run.keyFile).toBe("");
+    const described = JSON.stringify(describeConfig(cfg));
+    expect(described).toContain('"key_command":"op"');
+    expect(described).not.toContain("op://");
+    expect(described).not.toContain("credential");
+
+    const fromToml = loadConfig({
+      configPath: "/etc/relay-backport.toml",
+      env: {},
+      readFile: () => '[run]\nkey_command = ["op", "read", "op://vault/item/credential"]\n',
+    });
+    expect(fromToml.run.keyCommand).toEqual(["op", "read", "op://vault/item/credential"]);
+  });
+
+  test("the default timeout passed to the command is 30s, and a good stdout is trimmed", async () => {
+    let seenTimeout = 0;
+    const key = await readKeyFromCommand(["op", "read", "op://vault/item/credential"], {
+      spawn: async (_argv, timeoutMs) => {
+        seenTimeout = timeoutMs;
+        return { code: 0, stdout: `  ${SECRET}\n`, timedOut: false, overflow: false };
+      },
+    });
+    expect(seenTimeout).toBe(30_000);
+    expect(key).toBe(SECRET);
+  });
+
+  test("the plan names argv[0] and preflight resolves a bare name on PATH without running it", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const binDir = join(t.dir, "bin");
+    mkdirSync(binDir);
+    const script = writeExec(binDir, "print-key", "#!/bin/sh\nexit 7\n");
+    const { cfg, plan } = planOf(t.dir, { key_command: ["print-key", "op://vault/item/credential"] }, { PATH: binDir });
+    expect(plan.keyCommandPath).toBe(script);
+    expect(plan.keyBytes).toBeUndefined();
+    const text = renderPlan(plan);
+    expect(text).toContain("<from key_command: print-key>");
+    expect(text).not.toContain("op://vault/item/credential");
+    expect(text).not.toContain(SECRET);
+    const lines = await preflight({ plan, run: cfg.run, stateDir: cfg.stateDir, observe: false });
+    expect(lines.some((l) => l.level === "OK" && l.text === "key command executable: print-key (not run)")).toBe(true);
+    expect(lines.some((l) => l.level === "FAIL")).toBe(false);
+  });
+
+  test("a missing key command fails preflight, and a non-executable one does too", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const missing = planOf(t.dir, { key_command: ["no-such-relay-backport-key-cmd"] });
+    const missingLines = await preflight({ plan: missing.plan, run: missing.cfg.run, stateDir: missing.cfg.stateDir, observe: false });
+    expect(missingLines.some((l) => l.level === "FAIL" && l.text.includes("key command not found: no-such-relay-backport-key-cmd"))).toBe(true);
+
+    const script = writeExec(t.dir, "print-key", "#!/bin/sh\nexit 0\n");
+    chmodSync(script, 0o644);
+    const blocked = planOf(t.dir, { key_command: [script] });
+    const blockedLines = await preflight({ plan: blocked.plan, run: blocked.cfg.run, stateDir: blocked.cfg.stateDir, observe: false });
+    expect(blockedLines.some((l) => l.level === "FAIL" && l.text.includes("not executable"))).toBe(true);
+  });
+
+  test("a good key command puts the trimmed key in the child environment and nowhere else", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const script = writeExec(t.dir, "print-key", `#!/bin/sh\nprintf '%s\\n' '${SECRET}'\n`);
+    const { cfg, plan } = planOf(t.dir, { key_command: [script] });
+    let seen: { command: string; args: string[]; env: Record<string, string> } | undefined;
+    const outs: string[] = [];
+    const code = await runHarness({
+      plan,
+      run: cfg.run,
+      stateDir: cfg.stateDir,
+      env: { PATH: "/usr/bin", HOME: t.dir },
+      out: (s) => outs.push(s),
+      spawn: async (command, args, env) => {
+        seen = { command, args, env };
+        return 0;
+      },
+    });
+    expect(code).toBe(0);
+    expect(seen!.env[KEY_ENV]).toBe(SECRET);
+    expect(seen!.args.join(" ")).not.toContain(SECRET);
+    expect(seen!.command).not.toContain(SECRET);
+    expect(outs.join("\n")).not.toContain(SECRET);
+    expect(outs.join("\n")).toContain("EARS UP");
+    expect(renderPlan(plan)).not.toContain(SECRET);
+  });
+
+  test("empty stdout fails and the child is never spawned", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const script = writeExec(t.dir, "print-key", "#!/bin/sh\nprintf '\\n'\n");
+    const { cfg, plan } = planOf(t.dir, { key_command: [script] });
+    let spawned = false;
+    let message = "";
+    try {
+      await runHarness({
+        plan,
+        run: cfg.run,
+        stateDir: cfg.stateDir,
+        env: {},
+        out: () => {},
+        spawn: async () => {
+          spawned = true;
+          return 0;
+        },
+      });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("produced no key");
+    expect(spawned).toBe(false);
+  });
+
+  test("a bad format fails and the error does not contain the output", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const leak = "not-a-key-should-not-leak";
+    const script = writeExec(t.dir, "print-key", `#!/bin/sh\nprintf '%s\\n' '${leak}'\n`);
+    const { cfg, plan } = planOf(t.dir, { key_command: [script] });
+    let message = "";
+    try {
+      await runHarness({ plan, run: cfg.run, stateDir: cfg.stateDir, env: {}, out: () => {} });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("not a 64-hex");
+    expect(message).not.toContain(leak);
+    expect(message).not.toContain("EARS UP");
+  });
+
+  test("a non-zero exit fails and the error contains neither stdout nor stderr", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const leak = "stdout-leak-should-not-appear";
+    const errLeak = "stderr-leak-should-not-appear";
+    const script = writeExec(t.dir, "print-key", `#!/bin/sh\nprintf '%s\\n' '${leak}'\nprintf '%s\\n' '${errLeak}' >&2\nexit 3\n`);
+    const { cfg, plan } = planOf(t.dir, { key_command: [script] });
+    let message = "";
+    try {
+      await runHarness({ plan, run: cfg.run, stateDir: cfg.stateDir, env: {}, out: () => {} });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("exit 3");
+    expect(message).not.toContain(leak);
+    expect(message).not.toContain(errLeak);
+  });
+
+  test("a timeout fails without echoing partial output", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const leak = "timeout-leak-should-not-appear";
+    const script = writeExec(t.dir, "print-key", `#!/bin/sh\nprintf '%s\\n' '${leak}'\nexec sleep 30\n`);
+    const { cfg, plan } = planOf(t.dir, { key_command: [script] });
+    const started = Date.now();
+    let message = "";
+    try {
+      await runHarness({
+        plan,
+        run: cfg.run,
+        stateDir: cfg.stateDir,
+        env: {},
+        out: () => {},
+        keyCommandTimeoutMs: 400,
+      });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("timed out after 400ms");
+    expect(message).not.toContain(leak);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
+
+  test("setting both key_file and key_command is a config error", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const config = join(t.dir, "rb.json");
+    writeFileSync(
+      config,
+      JSON.stringify({
+        state_dir: t.dir,
+        run: {
+          buzz_acp: fakeBinary(t.dir),
+          key_file: keyFile(t.dir),
+          key_command: [writeExec(t.dir, "print-key", "#!/bin/sh\nexit 0\n")],
+          relay_url: "ws://127.0.0.1:1",
+          allowlist: [ALICE],
+        },
+      }),
+    );
+    const c = io();
+    expect(await main(["run", "--dry-run", "--config", config], c)).toBe(1);
+    const err = c.errLines.join("\n");
+    expect(err).toContain("mutually exclusive");
+    expect(err).not.toContain(SECRET);
+    expect(() =>
+      loadConfig({
+        env: { RELAY_BACKPORT_RUN_KEY_COMMAND: "op read op://vault/item/credential" },
+        overrides: { run: { key_file: "/tmp/agent.key" } },
+      }),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  test("--dry-run never runs the key command", async () => {
+    const t = tmpDir();
+    cleanups.push(t.cleanup);
+    const marker = join(t.dir, "key-command-ran");
+    const script = writeExec(t.dir, "print-key", `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nprintf '%s\\n' '${SECRET}'\n`);
+    const config = join(t.dir, "rb.json");
+    writeFileSync(
+      config,
+      JSON.stringify({
+        state_dir: t.dir,
+        run: {
+          buzz_acp: fakeBinary(t.dir),
+          key_command: [script],
+          relay_url: "ws://127.0.0.1:1",
+          owner: ALICE,
+          allowlist: [ALICE, BOB],
+        },
+      }),
+    );
+    const c = io();
+    expect(await main(["run", "--dry-run", "--config", config], c)).toBe(0);
+    const text = c.outLines.join("\n");
+    expect(existsSync(marker)).toBe(false);
+    expect(text).toContain(`<from key_command: ${script}>`);
+    expect(text).toContain("key command executable");
+    expect(text).toContain("(not run)");
+    expect(text).toContain("--dry-run: stopping here");
+    expect(text).not.toContain(SECRET);
+    expect(text).not.toContain("EARS UP");
   });
 });

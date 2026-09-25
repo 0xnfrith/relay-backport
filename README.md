@@ -224,7 +224,10 @@ sinks     = ["file"]                        # or ["webhook"] for shape B
 
 [run]
 buzz_acp       = "buzz-acp"                 # or $BUZZ_ACP_BIN; a bare name is looked up on PATH
-key_file       = "/etc/relay-backport/agent.key"   # mode 0600; the ONLY place the key comes from
+# Exactly one key source. A mode-0600 file:
+key_file       = "/etc/relay-backport/agent.key"
+# …or a command (no shell) whose stdout is the key. Do not set both.
+# key_command  = ["op", "read", "op://vault/item/credential"]
 relay_url      = "wss://relay.example.com"
 owner          = "<hex>"
 allowlist      = ["<hex>", "<hex>"]
@@ -233,18 +236,29 @@ session_title  = "relay-backport-ears"      # also how the duplicate-harness che
 ```
 
 ```sh
-relay-backport run --dry-run --config relay-backport.toml   # preflight + plan; starts nothing, reads no key
+relay-backport run --dry-run --config relay-backport.toml   # preflight + plan; starts nothing, reads no key, runs no key command
 relay-backport run --config relay-backport.toml             # ears up
 relay-backport run --config relay-backport.toml --observe   # ...and POST to the local observe page too
 ```
 
-**The key never leaves the file except into the child's environment.** `run` puts it in `BUZZ_PRIVATE_KEY` for the process it spawns and nowhere else: not on a command line (where `ps` would show it to every user on the box), not in a log line, not in the printed plan — which names the key's *file* and its *byte count* and stops there. `--dry-run` does not read the key's bytes at all; it stats the file for a size. The only values `run` prints are public keys, paths and counts.
+**The key reaches the child and nothing else.** `run` puts it in `BUZZ_PRIVATE_KEY` for the process it spawns and nowhere else: not on a command line (where `ps` would show it to every user on the box), not in a log line, not in the printed plan. Set exactly one of:
+
+- **`run.key_file`** (`RELAY_BACKPORT_RUN_KEY_FILE`) — a file, mode 0600. The plan names the file and its byte count. `--dry-run` does not read the bytes; it stats the file for a size.
+- **`run.key_command`** (`RELAY_BACKPORT_RUN_KEY_COMMAND`) — an argv array. In the environment the value is whitespace-split, the same way `exec.command` is; use the array form for an argument that contains a space. `run` executes it with no shell, once, after preflight passes, and never under `--dry-run`. Stdin is closed. Stderr is discarded, so it cannot end up in the error or the log. The key is stdout, trimmed, and it must be a 64-hex secret key or an `nsec1…`. A non-zero exit, empty output, a format that does not match, or a timeout (30s) starts nothing; the error names the failure and never the output. Preflight checks that the program exists and is executable — a bare name is resolved on `PATH`, a path is used as given — and does not run it. The plan line is `<from key_command: argv[0]>`.
+
+A secret manager, instead of a file:
+
+```toml
+key_command = ["op", "read", "op://vault/item/credential"]
+```
+
+Setting both `key_file` and `key_command` is a config error. Setting neither is a usage error, and it names both settings. The only values `run` prints are public keys, paths and counts.
 
 What it hands `buzz-acp`: `--session-title <run.session_title> --no-memory --lazy-pool --no-typing --multiple-event-handling queue`, and an environment of `BUZZ_RELAY_URL`, `BUZZ_ACP_AGENT_OWNER`, `BUZZ_ACP_RESPOND_TO=allowlist` + the merged `BUZZ_ACP_RESPOND_TO_ALLOWLIST`, `BUZZ_ACP_AGENT_COMMAND` (this program), `BUZZ_ACP_AGENT_ARGS` (`acp,--state-dir,…,--sink,…`), `BUZZ_ACP_SESSION_POLICY`, plus `RELAY_BACKPORT_STATE_DIR` / `RELAY_BACKPORT_SINKS`. Memory is off because relay-backport is a pipe, not an LLM; typing is off because it never replies, so a typing indicator would be a phantom; presence stays on, because "the agent is online" is the ears-up signal. `--multiple-event-handling queue` rather than the `steer` default: steering cancels an in-flight turn and re-dispatches a merged prompt, which for a file sink means the same mention can land in the file twice.
 
 The state dir and sinks are passed **twice** — as `RELAY_BACKPORT_*` environment, and as flags inside `BUZZ_ACP_AGENT_ARGS`, which win in relay-backport's precedence. Belt and braces: a harness that ever scrubs its child's environment still lands deliveries in the right file. The config file `run` was started with (`--config` or `RELAY_BACKPORT_CONFIG`) is forwarded to the agent child the same way, so `[file]` and `[webhook]` settings reach the process that actually delivers.
 
-The preflight prints `OK` / `WARN` / `FAIL` lines and refuses to start on any `FAIL`: the `buzz-acp` binary resolves, the key file exists with mode 0600 and a plausible size, the allowlist is non-empty, the state dir is writable or creatable, no other harness is already running under this session title (`pgrep`; a `WARN` rather than a `FAIL` where that cannot be asked, e.g. Windows), and — with `--observe` — the observe page answers. A relay that does not answer its NIP-11 probe is a **`WARN`, not a `FAIL`**: `buzz-acp` dials and retries the websocket itself, so refusing to start over one blipped HTTPS probe would be the worse failure.
+The preflight prints `OK` / `WARN` / `FAIL` lines and refuses to start on any `FAIL`: the `buzz-acp` binary resolves, the key file exists with mode 0600 and a plausible size **or** the key command's program exists and is executable (it is not run), the allowlist is non-empty, the state dir is writable or creatable, no other harness is already running under this session title (`pgrep`; a `WARN` rather than a `FAIL` where that cannot be asked, e.g. Windows), and — with `--observe` — the observe page answers. A relay that does not answer its NIP-11 probe is a **`WARN`, not a `FAIL`**: `buzz-acp` dials and retries the websocket itself, so refusing to start over one blipped HTTPS probe would be the worse failure.
 
 ### Doing it by hand
 
@@ -412,6 +426,8 @@ Precedence: defaults < config file (`--config`, TOML or JSON, or `RELAY_BACKPORT
 | `exec.timeout_ms` | `RELAY_BACKPORT_EXEC_TIMEOUT_MS` | `60000` | Kill the hook after this long |
 | `exec.pass_buzz_env` | `RELAY_BACKPORT_EXEC_PASS_BUZZ_ENV` | `false` | Hand the harness-injected `BUZZ_*` identity to the hook |
 | `exec.include_system_prompt` | `RELAY_BACKPORT_EXEC_INCLUDE_SYSTEM_PROMPT` | `false` | Attach the session's system prompt (verbatim) to the stdin JSON |
+| `run.key_file` | `RELAY_BACKPORT_RUN_KEY_FILE` | — | Mode-0600 file holding the harness key for `relay-backport run`. Mutually exclusive with `run.key_command` |
+| `run.key_command` | `RELAY_BACKPORT_RUN_KEY_COMMAND` | — | Argv (array in the file; whitespace-split in env) run with no shell; stdout is the key. Not run during preflight or `--dry-run`. 30s timeout. Mutually exclusive with `run.key_file` |
 
 Buzz's own variables (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, …) are not sink configuration: `BUZZ_RELAY_URL` is copied into payloads as `relay` and, when receipts are on, is the publish target; the key is registered with the log redactor at startup and is read only to sign a receipt. An API token is never read.
 
@@ -486,6 +502,7 @@ v0.2 therefore keeps only what `buzz-acp` does not do — delivery to tools that
 ## Security notes
 
 - Buzz's injected key and any API token are registered with the log redactor at startup. When receipts are off the key is not parsed or held. When they are on it is read lazily only for the own-message check on an otherwise eligible delivery, and to sign a publish (including a pending retry on start). The exec hook does not see the key unless `exec.pass_buzz_env` says so. A webhook bearer is masked the same way.
+- **`run.key_command` keeps the harness key off disk.** It runs an argv array with no shell and keeps only a trimmed stdout that is a 64-hex or `nsec1…` key, registered with the same redactor, then placed in the child's `BUZZ_PRIVATE_KEY`. The command's stdout and stderr are never logged, printed, or put on a command line. A non-zero exit, empty output, bad format, or 30s timeout reports the failure and not the output. Preflight and `--dry-run` do not run the command.
 - **`file.buzz_env_file` writes the agent's own private key to disk in plaintext** (`BUZZ_PRIVATE_KEY`, alongside `BUZZ_RELAY_URL` and `BUZZ_AUTH_TAG`). It exists so a terminal session with no other way to reach the harness's environment can `source` it and act as the agent through the `buzz` CLI — treat that file exactly like a private key file (mode 0600 where the platform honours file modes — not on Windows; keep its directory out of backups and screen shares). Off by default; turn it on only for a consumer that needs to *act* as the agent, not merely read its mentions.
 - The system prompt, wherever it lands (the sibling file, a webhook body, an exec hook's stdin), is Buzz's own conventions text — not a secret, but treat a file holding it like the delivery log: it can contain the agent's persona and team instructions.
 - `relay-backport observe` is the one command that listens on a socket: loopback by default, no authentication, no persistence, and it holds full prompt text in memory. Do not `--bind` it to a routable address, and close the page when you are done — anyone who can reach that port can read every prompt the agent received. It is never part of the `acp` path: the harness never starts it, and nothing breaks when it is not running.

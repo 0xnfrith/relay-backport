@@ -7,10 +7,12 @@
 // be preflighted, prints a redacted plan, and execs `buzz-acp` in the
 // foreground so the terminal running it IS the daemon.
 //
-// The one secret — the agent's private key — is read from a file and put in
-// the child's environment and nowhere else: never on a command line (where
-// `ps` would show it), never in a log line, never in the printed plan. The
-// only values this file prints are public keys, paths and byte counts.
+// The one secret — the agent's private key — comes from a file or from a
+// command's stdout, and is put in the child's environment and nowhere else:
+// never on a command line (where `ps` would show it), never in a log line,
+// never in the printed plan. The only values this file prints are public
+// keys, paths and byte counts. A key command is an argv array run with no
+// shell; if it fails, the error names the failure and never its output.
 import { accessSync, constants, existsSync, mkdirSync, statSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
@@ -22,6 +24,13 @@ export const KEY_ENV = "BUZZ_PRIVATE_KEY";
 /** A plausible secret key: 64 hex characters, or an `nsec1…` bech32 string, with slack for whitespace. */
 export const KEY_MIN_BYTES = 32;
 export const KEY_MAX_BYTES = 200;
+/** How long `run.key_command` may run before it is killed and nothing starts. */
+export const KEY_COMMAND_TIMEOUT_MS = 30_000;
+/** Stdout larger than a key (plus a trailing newline) is discarded, not kept. */
+const KEY_STDOUT_CAP = KEY_MAX_BYTES + 16;
+const HEX_KEY = /^[0-9a-fA-F]{64}$/;
+/** `nsec1` plus the bech32 charset (no `1`, `b`, `i`, or `o` in the data). */
+const NSEC_KEY = /^nsec1[023456789acdefghjklmnpqrstuvwxyz]+$/;
 
 export type PreflightLine = { level: "OK" | "WARN" | "FAIL"; text: string };
 
@@ -32,9 +41,13 @@ export type RunPlan = {
   args: string[];
   /** The child's environment additions — WITHOUT the key, which is added at spawn time. */
   env: Record<string, string>;
-  /** Where the key comes from, and how big it is. Its VALUE is never part of a plan. */
+  /** Where a file key comes from, and how big it is. Its VALUE is never part of a plan. */
   keyFile: string;
   keyBytes?: number;
+  /** Present when the key comes from a command. The plan prints argv[0] only. */
+  keyCommand?: string[];
+  /** argv[0] resolved to a file, when one exists. Preflight checks it; it is not run. */
+  keyCommandPath?: string;
   /** The sinks the relay-backport child is told to use. */
   sinks: SinkName[];
 };
@@ -118,9 +131,9 @@ export type BuildPlanOptions = {
 };
 
 /**
- * Build the plan. Pure apart from the filesystem reads it names, and it never
- * reads the key's bytes — only its size — so `--dry-run` can print a plan
- * without the secret ever entering this process.
+ * Build the plan. Pure apart from the filesystem reads it names. It never
+ * reads a key file's bytes — only its size — and it never runs a key command,
+ * so `--dry-run` can print a plan without the secret entering this process.
  */
 export function buildPlan(opts: BuildPlanOptions): RunPlan {
   const exists = opts.exists ?? existsSync;
@@ -180,13 +193,28 @@ export function buildPlan(opts: BuildPlanOptions): RunPlan {
   ];
 
   let keyBytes: number | undefined;
-  try {
-    keyBytes = statSize(run.keyFile);
-  } catch {
-    keyBytes = undefined;
+  let keyCommandPath: string | undefined;
+  if (run.keyCommand.length > 0) {
+    const argv0 = run.keyCommand[0];
+    if (argv0) keyCommandPath = resolveBinary(argv0, opts.env, exists);
+  } else {
+    try {
+      keyBytes = statSize(run.keyFile);
+    } catch {
+      keyBytes = undefined;
+    }
   }
 
-  return { command, args, env, keyFile: run.keyFile, keyBytes, sinks };
+  return {
+    command,
+    args,
+    env,
+    keyFile: run.keyFile,
+    keyBytes,
+    keyCommand: run.keyCommand.length > 0 ? [...run.keyCommand] : undefined,
+    keyCommandPath,
+    sinks,
+  };
 }
 
 /** The plan as printed. The key appears as its origin and size, never its value. */
@@ -199,7 +227,12 @@ export function renderPlan(plan: RunPlan): string {
   lines.push("");
   lines.push("  environment for that process (and its relay-backport child) only:");
   const width = Math.max(KEY_ENV.length, ...Object.keys(plan.env).map((k) => k.length));
-  lines.push(`    ${KEY_ENV.padEnd(width)} = <from ${plan.keyFile}, ${plan.keyBytes ?? "?"} bytes>   # never printed, never on a command line`);
+  const argv0 = plan.keyCommand?.[0];
+  if (argv0) {
+    lines.push(`    ${KEY_ENV.padEnd(width)} = <from key_command: ${argv0}>   # never printed, never on a command line`);
+  } else {
+    lines.push(`    ${KEY_ENV.padEnd(width)} = <from ${plan.keyFile}, ${plan.keyBytes ?? "?"} bytes>   # never printed, never on a command line`);
+  }
   for (const [k, v] of Object.entries(plan.env)) lines.push(`    ${k.padEnd(width)} = ${v}`);
   lines.push("");
   lines.push(`  sinks for the relay-backport child: ${plan.sinks.join(", ")}`);
@@ -219,6 +252,8 @@ export type PreflightOptions = {
   probe?: (url: string) => Promise<boolean>;
   /** Is some other process already running this session title? Undefined = could not tell. */
   duplicateSessionTitle?: (title: string) => Promise<boolean | undefined>;
+  /** Can this user execute a resolved key-command program? Default: `X_OK` (existence on Windows). */
+  executable?: (path: string) => boolean;
 };
 
 /**
@@ -241,8 +276,29 @@ export async function preflight(opts: PreflightOptions): Promise<PreflightLine[]
 
   out.push({ level: "OK", text: `buzz-acp: ${opts.plan.command}` });
 
-  // ---- the key file: mode and size only; the bytes are not read here -------
-  if (!exists(opts.run.keyFile)) {
+  // ---- the key: a file's mode and size, or a command that is not run here --
+  if (opts.run.keyCommand.length > 0) {
+    const argv0 = opts.run.keyCommand[0] ?? "";
+    const resolved = opts.plan.keyCommandPath;
+    const executable =
+      opts.executable ??
+      ((p: string) => {
+        try {
+          // Windows has no executable bit; existence is the check there.
+          accessSync(p, platform === "win32" ? constants.F_OK : constants.X_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    if (!resolved || !exists(resolved)) {
+      out.push({ level: "FAIL", text: `key command not found: ${argv0}` });
+    } else if (!executable(resolved)) {
+      out.push({ level: "FAIL", text: `key command not executable: ${resolved}` });
+    } else {
+      out.push({ level: "OK", text: `key command executable: ${argv0} (not run)` });
+    }
+  } else if (!exists(opts.run.keyFile)) {
     out.push({ level: "FAIL", text: `key file missing: ${opts.run.keyFile}` });
   } else if (opts.plan.keyBytes === undefined) {
     out.push({ level: "WARN", text: `key file present but unreadable by this user: ${opts.run.keyFile} — the size check is deferred to the run` });
@@ -356,6 +412,193 @@ export function readKey(path: string, readFile: (p: string) => string = (p) => r
   return key;
 }
 
+/** 64 hex characters, or an `nsec1…` of a plausible length. The value is not echoed by the caller. */
+export function isHarnessKey(value: string): boolean {
+  if (HEX_KEY.test(value)) return true;
+  if (value.length < KEY_MIN_BYTES || value.length > KEY_MAX_BYTES) return false;
+  return NSEC_KEY.test(value);
+}
+
+export type KeyCommandOutput = {
+  code: number;
+  stdout: string;
+  timedOut: boolean;
+  /** Stdout exceeded the key-sized cap. `stdout` is empty in that case. */
+  overflow: boolean;
+};
+
+/**
+ * Run `argv` with no shell. Stdout, trimmed, must be a harness key.
+ * Timeout, non-zero exit, empty output and a bad format all fail closed.
+ * Nothing thrown from here contains the command's output.
+ */
+export async function readKeyFromCommand(
+  argv: readonly string[],
+  opts: {
+    timeoutMs?: number;
+    spawn?: (argv: readonly string[], timeoutMs: number) => Promise<KeyCommandOutput>;
+  } = {},
+): Promise<string> {
+  if (argv.length === 0 || !argv[0]) throw new ConfigError("run.key_command is empty; nothing started");
+  const timeoutMs = opts.timeoutMs ?? KEY_COMMAND_TIMEOUT_MS;
+  let result: KeyCommandOutput;
+  try {
+    result = opts.spawn ? await opts.spawn(argv, timeoutMs) : await spawnKeyCommand(argv, timeoutMs);
+  } catch (err) {
+    if (err instanceof ConfigError) throw err;
+    throw new ConfigError("key command failed to start; nothing started");
+  }
+  if (result.timedOut) {
+    throw new ConfigError(`key command timed out after ${formatTimeout(timeoutMs)}; nothing started`);
+  }
+  if (result.overflow) {
+    throw new ConfigError("key command output is not a 64-hex secret key or an nsec1…; nothing started");
+  }
+  if (result.code !== 0) {
+    const status = Number.isInteger(result.code) && result.code > 0 ? ` (exit ${result.code})` : "";
+    throw new ConfigError(`key command failed${status}; nothing started`);
+  }
+  const key = result.stdout.trim();
+  if (!key) throw new ConfigError("key command produced no key; nothing started");
+  if (!isHarnessKey(key)) {
+    throw new ConfigError("key command output is not a 64-hex secret key or an nsec1…; nothing started");
+  }
+  registerSecret(key);
+  return key;
+}
+
+function formatTimeout(timeoutMs: number): string {
+  if (timeoutMs > 0 && timeoutMs % 1000 === 0) return `${timeoutMs / 1000}s`;
+  return `${timeoutMs}ms`;
+}
+
+async function spawnKeyCommand(argv: readonly string[], timeoutMs: number): Promise<KeyCommandOutput> {
+  const proc = Bun.spawn([...argv], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let timedOut = false;
+  const kill = (signal: NodeJS.Signals) => {
+    try {
+      proc.kill(signal);
+    } catch {
+      // already exited
+    }
+  };
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  const later = (ms: number, fn: () => void) => {
+    timers.push(setTimeout(fn, ms));
+  };
+  later(timeoutMs, () => {
+    timedOut = true;
+    kill("SIGTERM");
+    later(1_000, () => kill("SIGKILL"));
+  });
+  // Start the reads before waiting: a full pipe would otherwise deadlock the child.
+  // A child that outlives the timeout (or keeps the pipes open) cannot stall past the grace period.
+  const capturedP = readCapped(streamOf(proc.stdout), KEY_STDOUT_CAP, () => {
+    kill("SIGTERM");
+    later(1_000, () => kill("SIGKILL"));
+  });
+  const drainedP = drain(streamOf(proc.stderr));
+  const finished = (async (): Promise<KeyCommandOutput> => {
+    try {
+      const code = await proc.exited;
+      const captured = await capturedP;
+      await drainedP;
+      if (timedOut) return { code, stdout: "", timedOut: true, overflow: false };
+      if (captured.overflow) return { code, stdout: "", timedOut: false, overflow: true };
+      return { code, stdout: captured.text, timedOut: false, overflow: false };
+    } catch {
+      // Never surface a spawn/read error: it can quote the command's output.
+      return { code: -1, stdout: "", timedOut, overflow: false };
+    }
+  })();
+  let grace: ReturnType<typeof setTimeout> | undefined;
+  const giveUp = new Promise<KeyCommandOutput>((resolve) => {
+    grace = setTimeout(() => {
+      timedOut = true;
+      kill("SIGKILL");
+      resolve({ code: -1, stdout: "", timedOut: true, overflow: false });
+    }, timeoutMs + 1_500);
+  });
+  try {
+    return await Promise.race([finished, giveUp]);
+  } finally {
+    for (const t of timers) clearTimeout(t);
+    if (grace) clearTimeout(grace);
+  }
+}
+
+function streamOf(stream: unknown): ReadableStream<Uint8Array> | null {
+  if (stream && typeof stream !== "number" && typeof (stream as ReadableStream<Uint8Array>).getReader === "function") {
+    return stream as ReadableStream<Uint8Array>;
+  }
+  return null;
+}
+
+/** Read at most `cap` bytes. On overflow the buffer is dropped and `onOverflow` runs (kill the child). */
+async function readCapped(
+  stream: ReadableStream<Uint8Array> | null,
+  cap: number,
+  onOverflow: () => void,
+): Promise<{ text: string; overflow: boolean }> {
+  if (!stream) return { text: "", overflow: false };
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let overflow = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      if (total + value.byteLength > cap) {
+        overflow = true;
+        chunks.length = 0;
+        total = 0;
+        onOverflow();
+        break;
+      }
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // already closed
+    }
+  }
+  if (overflow) return { text: "", overflow: true };
+  const buf = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buf.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { text: new TextDecoder().decode(buf), overflow: false };
+}
+
+/** Discard a stream. Stderr is drained so a full pipe cannot stall the child, and never kept. */
+async function drain(stream: ReadableStream<Uint8Array> | null): Promise<void> {
+  if (!stream) return;
+  const reader = stream.getReader();
+  try {
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // already closed
+    }
+  }
+}
+
 export type RunOptions = {
   plan: RunPlan;
   run: RunConfig;
@@ -365,6 +608,10 @@ export type RunOptions = {
   readFile?: (p: string) => string;
   /** Test seam: spawn the child and resolve with its exit code. */
   spawn?: (command: string, args: string[], env: Record<string, string>) => Promise<number>;
+  /** Override for tests. Production uses {@link KEY_COMMAND_TIMEOUT_MS}. */
+  keyCommandTimeoutMs?: number;
+  /** Test seam for `run.key_command`. Production spawns `argv` with no shell. */
+  spawnKeyCommand?: (argv: readonly string[], timeoutMs: number) => Promise<KeyCommandOutput>;
   signal?: AbortSignal;
 };
 
@@ -376,7 +623,11 @@ export type RunOptions = {
  */
 export async function runHarness(opts: RunOptions): Promise<number> {
   mkdirSync(opts.stateDir, { recursive: true, mode: 0o700 });
-  const key = readKey(opts.run.keyFile, opts.readFile);
+  const key =
+    opts.run.keyCommand.length > 0
+      ? await readKeyFromCommand(opts.run.keyCommand, { timeoutMs: opts.keyCommandTimeoutMs, spawn: opts.spawnKeyCommand })
+      : readKey(opts.run.keyFile, opts.readFile);
+  opts.out("EARS UP — this terminal is the daemon. Ctrl-C stops it.");
   const childEnv: Record<string, string> = {};
   for (const [k, v] of Object.entries(opts.env)) if (v !== undefined) childEnv[k] = v;
   Object.assign(childEnv, opts.plan.env, { [KEY_ENV]: key });
