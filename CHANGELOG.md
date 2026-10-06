@@ -2,7 +2,7 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## 0.6.1 — 2026-10-06
+## 0.7.0 — 2026-10-06
 
 the `claude-code` view's `WAKE` line prints the whole event id
 
