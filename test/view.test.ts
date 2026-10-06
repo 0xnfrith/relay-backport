@@ -165,6 +165,9 @@ describe("projectClaudeCode", () => {
           for (const run of wake!.match(/[0-9a-f]{13,}/g) ?? []) expect([ID, ROOT]).toContain(run);
           const idField = wake!.match(/\| id (\S*)/);
           if (idField) expect(idField[1]).toBe(ID);
+          // No hex run is longer than 12 inside a uuid, so only the field itself can show a cut `ch`.
+          const chField = wake!.match(/\| ch (\S*)/);
+          if (chField) expect(chField[1]).toBe(CHANNEL);
           const replyField = wake!.match(/\| reply (\S*)/);
           if (replyField) expect(replyField[1]).toBe(scope === "thread" ? ROOT : ID);
         }

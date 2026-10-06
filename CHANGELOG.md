@@ -2,6 +2,14 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.7.1 — 2026-10-06
+
+a test for the `ch` field; no change to what the view prints
+
+### Changed
+
+- The width sweep in `test/view.test.ts` now also checks the `ch` field of the `WAKE` header at every budget: it must be the whole channel id or absent. A uuid has no hex run longer than 12, so the existing check for cut ids could not see a cut one, and a change that let the header cut `ch` partway passed the suite.
+
 ## 0.7.0 — 2026-10-06
 
 the `claude-code` view's `WAKE` line prints the whole event id
