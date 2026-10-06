@@ -2,6 +2,16 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.6.1 — 2026-10-06
+
+the `claude-code` view's `WAKE` line prints the whole event id
+
+### Changed
+
+- **`WAKE` prints `id <64 hex>`** (the whole event id) where it printed the first 12. A short id could not be turned back into a message link, and a link built by filling in the rest points at nothing. The `TEXT` line keeps its 12-hex id so the body keeps its room, and `MIN_VISIBLE_CHARS` is unchanged because it counts the `TEXT` prefix only.
+- **The header still fits `view.visible_chars`.** The purpose, thread title, channel name and speaker list shrink first, as before, and the id is never one of them. When that is not enough, whole trailing fields drop; a `reply`, `ch` or `id` field that does not fit is dropped whole instead of cut. A cut id is the failure this release removes, so no budget can leave part of one on the line.
+- A consumer that matched `id <12 hex>` on the `WAKE` line must match `id <64 hex>`. The stored `MENTION|` record and the default `raw` view are unchanged.
+
 ## 0.6.0 — 2026-09-25
 
 the harness key can come from a command instead of a file

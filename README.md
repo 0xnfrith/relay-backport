@@ -357,11 +357,12 @@ Cursor semantics do not depend on the view: **one file record advances the curso
 An interactive Claude Code session fed by a Monitor that cuts each **line** at about 500 characters and delivers lines printed together as one push. For each `MENTION|` record the view prints **two lines in one write**:
 
 ```
-WAKE mention | #<channel> (<scope> "<thread title, 40 max>") - <purpose, 40 max> | from <name> [<human|agent|unknown>[, owner <name>]] | reply <64 hex> | ch <uuid> | id <12 hex> | <HH:MMZ> | thread +N (<speaker n>, ...) | <len>ch
+WAKE mention | #<channel> (<scope> "<thread title, 40 max>") - <purpose, 40 max> | from <name> [<human|agent|unknown>[, owner <name>]] | reply <64 hex> | ch <uuid> | id <64 hex> | <HH:MMZ> | thread +N (<speaker n>, ...) | <len>ch
 TEXT | <12 hex> | <message text, newlines as \n , cut so the line fits>
 ```
 
-- The visible budget is `view.visible_chars` (default 500, minimum 32 so the TEXT prefix plus some body fits). Counted in characters. The writer enforces every cap; neither line exceeds the budget. Truncate, never wrap. Newlines in the body become the ASCII marker ` \n ` (backslash-n) so the byte length matches the character count.
+- `WAKE` carries the whole 64-hex event id, so a `buzz://message?channel=<uuid>&id=<64 hex>` link can be built from the line without guessing. `TEXT` keeps the first 12 hex so the body keeps its room.
+- The visible budget is `view.visible_chars` (default 500, minimum 32 so the TEXT prefix plus some body fits). Counted in characters. The writer enforces every cap; neither line exceeds the budget. Truncate, never wrap. When the header is over budget the purpose, then the thread title, then the channel name, then the speaker list are clipped first; the ids are never clipped. Only if the header still does not fit are whole fields dropped from the tail, and a `reply`, `ch` or `id` field that does not fit is dropped whole, never cut. Newlines in the body become the ASCII marker ` \n ` (backslash-n) so the byte length matches the character count.
 - `human` / `agent`: an `auth` tag on the event means agent, and its second element is the owner's key. No tag: `human` only if the key is `run.owner` or is labelled in `[identities]`; otherwise `unknown`. Owner status comes only from config, never from text. The configured owner renders as `[human, owner]`; `owner <name>` is only for an agent's owner.
 - When `scope` is absent on the record, a root (or reply) `e` tag means `thread`.
 - The quoted thread title is the root message's text, from a structured id only: this record's own `id`, or a catch-up entry of kind `event` whose `event_id` field equals the root. A `block` entry and any `event <id>` in message text are ignored. If there is no match, the header prints `(thread)` with no title. A running `tail` caches up to 256 root ids, oldest out.
