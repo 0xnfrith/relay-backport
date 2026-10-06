@@ -318,6 +318,27 @@ export function threadTitleFromRoot(
   return title || undefined;
 }
 
+/**
+ * The last resort when the shrinks above still leave the header over budget:
+ * keep whole ` | ` fields from the front. A `reply`, `ch` or `id` field that
+ * does not fit is dropped whole, so the line never shows part of an id; any
+ * other field is cut where the budget falls. Names, titles and purposes pass
+ * through `oneLine`, which removes `|`, so they cannot add a separator.
+ */
+function cutHeader(header: string, budget: number): string {
+  if (header.length <= budget) return header;
+  let out = "";
+  for (const part of header.split(" | ")) {
+    const next = out ? `${out} | ${part}` : part;
+    if (next.length <= budget) {
+      out = next;
+      continue;
+    }
+    return /^(reply|ch|id) /.test(part) ? out : next.slice(0, budget);
+  }
+  return out;
+}
+
 function whoClause(display: string, cls: SenderClassInfo): string {
   return `from ${display} ${classBracket(cls)}`;
 }
@@ -346,6 +367,7 @@ export function projectClaudeCode(line: string, opts: ClaudeCodeViewOptions = {}
   const content = typeof obj.content === "string" ? obj.content : "";
   const id = typeof obj.id === "string" ? obj.id.toLowerCase() : "";
   const id12 = id.slice(0, 12) || "?";
+  const idFull = id || "?";
   const ch = (typeof obj.h === "string" && obj.h ? obj.h : channelOf({ tags: obj.tags ?? [] })) || "?";
   const pubkey = typeof obj.from === "string" && obj.from !== "unknown" ? obj.from : "";
   const tags = obj.tags;
@@ -378,9 +400,9 @@ export function projectClaudeCode(line: string, opts: ClaudeCodeViewOptions = {}
       thread += ` (${clip(inner, speakersMax)})`;
     }
     if (type === "dm") {
-      return `WAKE dm | DM with ${display} ${classBracket(cls)} | reply ${reply} | ch ${ch} | id ${id12} | ${at} | ${thread} | ${len}`;
+      return `WAKE dm | DM with ${display} ${classBracket(cls)} | reply ${reply} | ch ${ch} | id ${idFull} | ${at} | ${thread} | ${len}`;
     }
-    return `WAKE ${type} | #${name} (${scopeBit}) - ${purpose} | ${who} | reply ${reply} | ch ${ch} | id ${id12} | ${at} | ${thread} | ${len}`;
+    return `WAKE ${type} | #${name} (${scopeBit}) - ${purpose} | ${who} | reply ${reply} | ch ${ch} | id ${idFull} | ${at} | ${thread} | ${len}`;
   };
 
   let nameMax = NAME_MAX;
@@ -405,7 +427,7 @@ export function projectClaudeCode(line: string, opts: ClaudeCodeViewOptions = {}
     speakersMax = shrink(header.length - budget, speakersMax);
     header = assemble(nameMax, titleMax, purposeMax, speakersMax);
   }
-  if (header.length > budget) header = header.slice(0, budget);
+  header = cutHeader(header, budget);
 
   const marked = content.replace(/\r\n|\n|\r/g, NEWLINE_MARK);
   const textPrefix = `TEXT | ${id12} | `;
