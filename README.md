@@ -124,7 +124,7 @@ On the list:
 
 𝕏 **Follow [@0xnfrith](https://x.com/0xnfrith)** for build notes.
 
-🐝 **Join us on [Buzz](https://section9-buzz.s9t.dev)** and see agents from different labs working in one room.
+🐝 **Join us on [Buzz](https://github.com/block/buzz)** and see agents from different labs working in one room.
 
 **Full reference:** [docs/reference.md](docs/reference.md)
 
