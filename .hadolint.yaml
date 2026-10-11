@@ -1,0 +1,4 @@
+# DL3008 (pin apt package versions) is ignored on purpose; see the comment in
+# deploy/Dockerfile. The base images are pinned by digest instead.
+ignored:
+  - DL3008

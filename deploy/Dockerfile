@@ -9,7 +9,9 @@
 # (`BUZZ_ACP_AGENT_COMMAND=relay-backport`, see README "Headless: buzz-acp");
 # this image is the building block for that. `/data` holds the delivery file.
 
-FROM oven/bun:1.3.6 AS build
+# Base images are pinned by digest (Dependabot's docker ecosystem keeps them current).
+# The oven/bun tag must equal .bun-version; CI fails if they drift.
+FROM oven/bun:1.3.6@sha256:f20d9cf365ab35529384f1717687c739c92e6f39157a35a95ef06f4049a10e4a AS build
 WORKDIR /src
 COPY package.json bun.lock tsconfig.json ./
 RUN bun install --frozen-lockfile
@@ -17,15 +19,19 @@ COPY src ./src
 # No --target: compile for the build platform's own arch (amd64 or arm64).
 RUN bun build --compile src/cli.ts --outfile /out/relay-backport
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+# ca-certificates is deliberately not version-pinned (hadolint DL3008): Debian drops
+# superseded versions from its mirrors, so an exact pin breaks the build and holds
+# back CA bundle security fixes. The digest-pinned base image is the reproducibility knob.
+# A fixed numeric UID/GID lets Kubernetes `runAsNonRoot: true` verify the user.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
-  && groupadd --system relay \
-  && useradd --system --gid relay --home /data --shell /usr/sbin/nologin relay \
-  && mkdir -p /data && chown relay:relay /data && chmod 0700 /data
+  && groupadd --system --gid 10001 relay \
+  && useradd --system --uid 10001 --gid 10001 --home /data --shell /usr/sbin/nologin relay \
+  && mkdir -p /data && chown 10001:10001 /data && chmod 0700 /data
 COPY --from=build /out/relay-backport /usr/local/bin/relay-backport
-USER relay
+USER 10001:10001
 VOLUME ["/data"]
 ENV RELAY_BACKPORT_STATE_DIR=/data \
     RELAY_BACKPORT_LOG_FORMAT=json

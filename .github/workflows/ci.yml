@@ -86,6 +86,8 @@ jobs:
           done
       - run: docker build -f deploy/Dockerfile -t relay-backport:ci .
       - run: docker run --rm relay-backport:ci --version
+      - name: image runs as the numeric non-root user
+        run: test "$(docker run --rm --entrypoint id relay-backport:ci -u)" = 10001
 
   native:
     name: native (${{ matrix.os }})
@@ -131,3 +133,20 @@ jobs:
         run: bun test test/binary.test.ts
         env:
           RELAY_BACKPORT_BIN: ${{ github.workspace }}/dist/${{ matrix.bin }}
+
+  hadolint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HADOLINT_VERSION: v2.15.1
+      HADOLINT_SHA256: c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: install hadolint ${{ env.HADOLINT_VERSION }}
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/hadolint" "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-linux-x86_64"
+          echo "${HADOLINT_SHA256}  $RUNNER_TEMP/hadolint" | sha256sum --check --strict
+          chmod +x "$RUNNER_TEMP/hadolint"
+      - run: '"$RUNNER_TEMP/hadolint" deploy/Dockerfile'
