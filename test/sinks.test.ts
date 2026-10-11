@@ -307,7 +307,7 @@ describe("exec sink", () => {
     writeFileSync(script, `await Bun.write(${JSON.stringify(out)}, JSON.stringify(process.env));\n`);
     const harnessEnv = {
       PATH: process.env.PATH,
-      HOME: process.env.HOME,
+      HOME: process.env.HOME ?? "/home/hook", // Windows runners define no HOME
       LC_ALL: "C",
       BUZZ_PRIVATE_KEY: "nsec1-should-not-reach-the-hook-by-default",
       BUZZ_RELAY_URL: "wss://relay.example",
