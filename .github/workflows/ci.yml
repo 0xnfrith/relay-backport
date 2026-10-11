@@ -150,3 +150,25 @@ jobs:
           echo "${HADOLINT_SHA256}  $RUNNER_TEMP/hadolint" | sha256sum --check --strict
           chmod +x "$RUNNER_TEMP/hadolint"
       - run: '"$RUNNER_TEMP/hadolint" deploy/Dockerfile'
+
+  workflow-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      ZIZMOR_VERSION: 1.30.1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: actionlint ${{ env.ACTIONLINT_VERSION }}
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/actionlint.tar.gz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+      - name: zizmor ${{ env.ZIZMOR_VERSION }}
+        run: pipx run "zizmor==${ZIZMOR_VERSION}" --format=github .
+        env:
+          GH_TOKEN: ${{ github.token }}
