@@ -60,7 +60,7 @@ function bunCommand(js: string): string[] {
 }
 
 function runConfig(dir: string, extra: Record<string, unknown> = {}) {
-  const useCommand = Object.prototype.hasOwnProperty.call(extra, "key_command");
+  const useCommand = Object.hasOwn(extra, "key_command");
   const cfg = loadConfig({
     env: {},
     overrides: {

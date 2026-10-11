@@ -89,7 +89,7 @@ describe("session accounting", () => {
     const ledger = new SessionLedger();
     const system = "S".repeat(40_000); // ~10k tokens, re-sent on every POST by the webhook sink
     const prompt = "P".repeat(400); // 100 tokens
-    let totals;
+    let totals: ReturnType<SessionLedger["add"]>["totals"] | undefined;
     for (let i = 0; i < 3; i++) {
       const p = parsePayload(payload({ prompt, system_prompt: system }), 1_700_000_100_000)!;
       totals = ledger.add(p).totals;
@@ -267,8 +267,7 @@ describe("SSE", () => {
         const { value, done } = await reader.read();
         if (done) return;
         buf += decoder.decode(value, { stream: true });
-        let i: number;
-        while ((i = buf.indexOf("\n\n")) >= 0) {
+        for (let i = buf.indexOf("\n\n"); i >= 0; i = buf.indexOf("\n\n")) {
           const chunk = buf.slice(0, i);
           buf = buf.slice(i + 2);
           if (chunk.startsWith("data: ")) frames.push(JSON.parse(chunk.slice(6)));
