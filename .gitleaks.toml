@@ -1,0 +1,12 @@
+title = "relay-backport gitleaks config"
+
+[extend]
+useDefault = true
+
+# GitHub secret scanning and the default gitleaks rules do not recognise Nostr
+# private keys, which this tool handles (BUZZ_PRIVATE_KEY, key files, key commands).
+[[rules]]
+id = "nostr-nsec"
+description = "Nostr private key (NIP-19 nsec)"
+regex = '''nsec1[02-9ac-hj-np-z]{58}'''
+keywords = ["nsec1"]
