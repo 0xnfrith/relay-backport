@@ -55,8 +55,9 @@ describe("config loading", () => {
   });
 
   test("state dir: XDG_STATE_HOME wins on POSIX, LOCALAPPDATA on Windows", () => {
-    expect(defaultStateDir({ XDG_STATE_HOME: "/xdg", HOME: "/home/u" }, "linux")).toBe("/xdg/relay-backport");
-    expect(defaultStateDir({ HOME: "/home/u" }, "darwin")).toBe("/home/u/.local/state/relay-backport");
+    // `join` uses the host's separator even when a platform is simulated.
+    expect(defaultStateDir({ XDG_STATE_HOME: "/xdg", HOME: "/home/u" }, "linux")).toBe(join("/xdg", "relay-backport"));
+    expect(defaultStateDir({ HOME: "/home/u" }, "darwin")).toBe(join("/home/u", ".local", "state", "relay-backport"));
     expect(defaultStateDir({ LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local" }, "win32")).toBe(join("C:\\Users\\u\\AppData\\Local", "relay-backport"));
   });
 

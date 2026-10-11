@@ -327,7 +327,11 @@ describe("exec sink", () => {
     expect(seen.LC_ALL).toBe("C");
     expect(seen.RELAY_BACKPORT_EVENT_ID).toBe(d.event.id);
     expect(seen.RELAY_BACKPORT_AUTHOR).toBe(SENDER);
-    expect(Object.keys(seen).filter((k) => !(HOOK_ENV_PASSTHROUGH.includes(k) || k.startsWith("LC_") || k.startsWith("RELAY_BACKPORT_")))).toEqual([]);
+    // Windows adds these system variables to every child process itself; none comes from hookEnv.
+    const addedByWindows = process.platform === "win32" ? ["HOMEDRIVE", "HOMEPATH", "LOGONSERVER", "SYSTEMDRIVE", "USERDOMAIN", "USERNAME", "WINDIR"] : [];
+    expect(
+      Object.keys(seen).filter((k) => !(HOOK_ENV_PASSTHROUGH.includes(k) || addedByWindows.includes(k) || k.startsWith("LC_") || k.startsWith("RELAY_BACKPORT_"))),
+    ).toEqual([]);
 
     expect(await new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000, passBuzzEnv: true, includeSystemPrompt: false }, harnessEnv).deliver(d)).toBe(true);
     const withBuzz = JSON.parse(await Bun.file(out).text()) as Record<string, string>;
