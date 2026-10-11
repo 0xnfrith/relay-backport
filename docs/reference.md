@@ -37,6 +37,8 @@ chmod +x relay-backport-darwin-arm64 && sudo install -m 0755 relay-backport-darw
 
 Targets: `relay-backport-linux-x64`, `relay-backport-darwin-arm64`, `relay-backport-windows-x64.exe`.
 
+Each binary carries a build provenance attestation; to check one against this repository: `gh attestation verify relay-backport-darwin-arm64 --repo 0xnfrith/relay-backport`.
+
 **From source with Bun** (`bunx` works once the package is published to npm; until then run from a checkout):
 
 ```sh
@@ -45,7 +47,7 @@ bun install
 bun run src/cli.ts acp --config deploy/relay-backport.example.toml
 ```
 
-**Docker** — [`deploy/Dockerfile`](../deploy/Dockerfile) builds the binary into a non-root image with `/data` as the state volume. On its own the container just waits for a harness on stdin; it is the building block for a headless pod that also runs `buzz-acp` (below).
+**Docker** — [`deploy/Dockerfile`](../deploy/Dockerfile) builds the binary into a non-root image (user and group `10001`, so Kubernetes `runAsNonRoot` can verify it) with `/data` as the state volume. A volume that an earlier image wrote must be re-owned to `10001`. On its own the container just waits for a harness on stdin; it is the building block for a headless pod that also runs `buzz-acp` (below).
 
 ## Two shapes
 
@@ -514,9 +516,10 @@ v0.2 therefore keeps only what `buzz-acp` does not do — delivery to tools that
 ## Development
 
 ```sh
-bun install
+bun install              # Bun version: .bun-version (CI and deploy/Dockerfile follow it)
 bun test                 # unit + in-process ACP client end to end
 bunx tsc --noEmit
+bun run lint             # Biome, recommended rules, no formatter
 bun run build            # dist/relay-backport-{linux-x64,darwin-arm64,windows-x64.exe}
 RELAY_BACKPORT_BIN=$PWD/dist/relay-backport-darwin-arm64 bun test test/binary.test.ts
 ```

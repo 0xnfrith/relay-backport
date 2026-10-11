@@ -2,6 +2,7 @@
   "name": "relay-backport",
   "version": "0.7.1",
   "devDependencies": {
+    "@biomejs/biome": "2.5.15",
     "@types/bun": "^1.2.20",
     "typescript": "^5.6.0"
   },
@@ -19,6 +20,7 @@
     "start": "bun run src/cli.ts acp",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
+    "lint": "biome ci --error-on-warnings src test",
     "build": "bun run build:linux && bun run build:darwin && bun run build:windows",
     "build:linux": "bun build --compile --target=bun-linux-x64 src/cli.ts --outfile dist/relay-backport-linux-x64",
     "build:darwin": "bun build --compile --target=bun-darwin-arm64 src/cli.ts --outfile dist/relay-backport-darwin-arm64",

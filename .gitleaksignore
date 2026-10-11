@@ -1,0 +1,13 @@
+# Exact-fingerprint allowlist (commit:file:rule:line) for findings in history that
+# were checked and are not secrets. Nothing else is allowlisted, so any new match
+# in the same files is still reported.
+
+# Test fixtures written as `nsec1...` strings that cannot be keys: 65 and 36
+# characters long (a real nsec is exactly 63) and not valid bech32. They are
+# inputs to the redaction tests.
+a59418d8822750867996b19de63fb4bcb9f1b436:test/acp-server.test.ts:generic-api-key:13
+a59418d8822750867996b19de63fb4bcb9f1b436:test/config.test.ts:generic-api-key:120
+
+# "nsec1" followed by 58 identical `q` characters (bech32 zero data, invalid
+# checksum), the fixture for "a malformed nsec never echoes the input".
+858dc202c1341fd439245129bc09254c513533a5:test/config.test.ts:nostr-nsec:116

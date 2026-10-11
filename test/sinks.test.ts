@@ -307,7 +307,7 @@ describe("exec sink", () => {
     writeFileSync(script, `await Bun.write(${JSON.stringify(out)}, JSON.stringify(process.env));\n`);
     const harnessEnv = {
       PATH: process.env.PATH,
-      HOME: process.env.HOME,
+      HOME: process.env.HOME ?? "/home/hook", // Windows runners define no HOME
       LC_ALL: "C",
       BUZZ_PRIVATE_KEY: "nsec1-should-not-reach-the-hook-by-default",
       BUZZ_RELAY_URL: "wss://relay.example",
@@ -327,7 +327,11 @@ describe("exec sink", () => {
     expect(seen.LC_ALL).toBe("C");
     expect(seen.RELAY_BACKPORT_EVENT_ID).toBe(d.event.id);
     expect(seen.RELAY_BACKPORT_AUTHOR).toBe(SENDER);
-    for (const k of Object.keys(seen)) expect(HOOK_ENV_PASSTHROUGH.includes(k) || k.startsWith("LC_") || k.startsWith("RELAY_BACKPORT_")).toBe(true);
+    // Windows adds these system variables to every child process itself; none comes from hookEnv.
+    const addedByWindows = process.platform === "win32" ? ["HOMEDRIVE", "HOMEPATH", "LOGONSERVER", "SYSTEMDRIVE", "USERDOMAIN", "USERNAME", "WINDIR"] : [];
+    expect(
+      Object.keys(seen).filter((k) => !(HOOK_ENV_PASSTHROUGH.includes(k) || addedByWindows.includes(k) || k.startsWith("LC_") || k.startsWith("RELAY_BACKPORT_"))),
+    ).toEqual([]);
 
     expect(await new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000, passBuzzEnv: true, includeSystemPrompt: false }, harnessEnv).deliver(d)).toBe(true);
     const withBuzz = JSON.parse(await Bun.file(out).text()) as Record<string, string>;

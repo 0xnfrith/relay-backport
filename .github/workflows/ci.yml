@@ -4,30 +4,44 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.3.6"
+          bun-version-file: .bun-version
+          no-cache: true
       - run: bun install --frozen-lockfile
       - run: bunx tsc --noEmit
-      - run: bun test
+      - name: bun test (per-file coverage floor from bunfig.toml; a miss exits 1 without a message)
+        run: bun test --coverage --coverage-reporter=text
 
   compile:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: test
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.3.6"
+          bun-version-file: .bun-version
+          no-cache: true
       - run: bun install --frozen-lockfile
       - name: compile linux-x64
         run: bun build --compile --target=bun-linux-x64 src/cli.ts --outfile dist/relay-backport-linux-x64
@@ -51,8 +65,143 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: test
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Dockerfile oven/bun tag matches .bun-version
+        run: |
+          want="$(tr -d '[:space:]' < .bun-version)"
+          tags="$(sed -nE 's#^FROM[[:space:]]+oven/bun:([^@[:space:]]+).*#\1#p' deploy/Dockerfile)"
+          if [ -z "$tags" ]; then
+            echo "::error file=deploy/Dockerfile::no oven/bun:<tag> FROM line found"
+            exit 1
+          fi
+          for tag in $tags; do
+            if [ "$tag" != "$want" ]; then
+              echo "::error file=deploy/Dockerfile::oven/bun:$tag does not match .bun-version ($want)"
+              exit 1
+            fi
+          done
       - run: docker build -f deploy/Dockerfile -t relay-backport:ci .
       - run: docker run --rm relay-backport:ci --version
+      - name: image runs as the numeric non-root user
+        run: test "$(docker run --rm --entrypoint id relay-backport:ci -u)" = 10001
+
+  native:
+    name: native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    needs: compile
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, bin: relay-backport-darwin-arm64 }
+          - { os: windows-latest, bin: relay-backport-windows-x64.exe }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+          no-cache: true
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: binaries
+          path: dist
+      - name: make the binary executable
+        if: runner.os != 'Windows'
+        run: chmod +x "dist/${BIN}"
+        env:
+          BIN: ${{ matrix.bin }}
+      - name: smoke the shipped binary
+        shell: bash
+        run: |
+          "./dist/${BIN}" --version
+          "./dist/${BIN}" --help > /dev/null
+        env:
+          BIN: ${{ matrix.bin }}
+      - name: unit tests
+        if: ${{ !cancelled() }}
+        run: bun test
+      - name: binary end-to-end
+        if: ${{ !cancelled() }}
+        run: bun test test/binary.test.ts
+        env:
+          RELAY_BACKPORT_BIN: ${{ github.workspace }}/dist/${{ matrix.bin }}
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+          no-cache: true
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+
+  hadolint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HADOLINT_VERSION: v2.15.1
+      HADOLINT_SHA256: c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: install hadolint ${{ env.HADOLINT_VERSION }}
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/hadolint" "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-linux-x86_64"
+          echo "${HADOLINT_SHA256}  $RUNNER_TEMP/hadolint" | sha256sum --check --strict
+          chmod +x "$RUNNER_TEMP/hadolint"
+      - run: '"$RUNNER_TEMP/hadolint" deploy/Dockerfile'
+
+  workflow-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      ZIZMOR_VERSION: 1.30.1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: actionlint ${{ env.ACTIONLINT_VERSION }}
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/actionlint.tar.gz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+      - name: zizmor ${{ env.ZIZMOR_VERSION }}
+        run: pipx run "zizmor==${ZIZMOR_VERSION}" --format=github .
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks ${{ env.GITLEAKS_VERSION }} (full history, matches redacted)
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/gitleaks.tar.gz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner .
