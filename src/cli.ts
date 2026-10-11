@@ -16,7 +16,7 @@ import { DEFAULT_BIND, DEFAULT_BUFFER, DEFAULT_PORT, startObserveServer } from "
 import { Receipts } from "./receipt";
 import { buildSinks } from "./sinks/index";
 import { buildPlan, pgrepSessionTitle, preflight, probeUrl, renderPlan, runHarness } from "./run";
-import { ShowError, showDeliveries } from "./show";
+import { showDeliveries } from "./show";
 import { stripThreadContext, tailFile } from "./tail";
 import { NAME, VERSION } from "./version";
 import { DEFAULT_VISIBLE_CHARS, MIN_VISIBLE_CHARS, TitleCache, projectClaudeCode } from "./view";
