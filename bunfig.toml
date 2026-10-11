@@ -1,0 +1,7 @@
+[test]
+# src/acp-server.ts is exercised through a child process (spawnAcp), which Bun's
+# coverage does not see, so it reads ~52% lines; test/ is not product code.
+coveragePathIgnorePatterns = ["test/**", "src/acp-server.ts"]
+# Bun checks these per file, not overall. Today's lowest file is 79% lines (sinks/index.ts)
+# and 65% functions (cli.ts, whose signal handlers only run in a real process).
+coverageThreshold = { lines = 0.70, functions = 0.50 }

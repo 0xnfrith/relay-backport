@@ -27,7 +27,8 @@ jobs:
           no-cache: true
       - run: bun install --frozen-lockfile
       - run: bunx tsc --noEmit
-      - run: bun test
+      - name: bun test (per-file coverage floor from bunfig.toml; a miss exits 1 without a message)
+        run: bun test --coverage --coverage-reporter=text
 
   compile:
     runs-on: ubuntu-latest
