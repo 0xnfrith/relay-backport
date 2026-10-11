@@ -37,6 +37,8 @@ chmod +x relay-backport-darwin-arm64 && sudo install -m 0755 relay-backport-darw
 
 Targets: `relay-backport-linux-x64`, `relay-backport-darwin-arm64`, `relay-backport-windows-x64.exe`.
 
+Each binary carries a build provenance attestation; to check one against this repository: `gh attestation verify relay-backport-darwin-arm64 --repo 0xnfrith/relay-backport`.
+
 **From source with Bun** (`bunx` works once the package is published to npm; until then run from a checkout):
 
 ```sh
