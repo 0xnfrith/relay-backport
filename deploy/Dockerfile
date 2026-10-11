@@ -9,7 +9,7 @@
 # (`BUZZ_ACP_AGENT_COMMAND=relay-backport`, see README "Headless: buzz-acp");
 # this image is the building block for that. `/data` holds the delivery file.
 
-FROM oven/bun:1 AS build
+FROM oven/bun:1.3.6 AS build
 WORKDIR /src
 COPY package.json bun.lock tsconfig.json ./
 RUN bun install --frozen-lockfile
