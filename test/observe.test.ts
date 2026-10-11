@@ -192,29 +192,41 @@ describe("/ingest validation", () => {
     expect(await second.json()).toEqual({ ok: true, seq: 2 });
   });
 
+  // Windows resets the connection when the server refuses an upload it has not finished
+  // reading, so the client sees ECONNRESET instead of the 413. Nothing is buffered either way.
+  async function statusOrReset(sent: Promise<Response>): Promise<number | "reset"> {
+    try {
+      return (await sent).status;
+    } catch (err) {
+      if (process.platform === "win32" && (err as { code?: string }).code === "ECONNRESET") return "reset";
+      throw err;
+    }
+  }
+
   test("a body over the cap is 413 and is never buffered", async () => {
     const s = serve();
     const huge = JSON.stringify({ event_id: EVENT_ID, prompt: "X".repeat(MAX_INGEST_BYTES + 1024) });
     expect(huge.length).toBeGreaterThan(MAX_INGEST_BYTES);
-    const res = await post(s.port, huge);
-    expect(res.status).toBe(413);
+    expect([413, "reset"]).toContain(await statusOrReset(post(s.port, huge)));
     expect(s.records()).toEqual([]);
     expect(s.sessions()).toEqual([]);
     // A streamed body that declares no content-length is capped the same way:
     // Bun's own maxRequestBodySize does not stop a chunked POST.
-    const chunked = await fetch(`http://${DEFAULT_BIND}:${s.port}/ingest`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      duplex: "half",
-      body: new ReadableStream<Uint8Array>({
-        start(c) {
-          const chunk = new TextEncoder().encode("X".repeat(64 * 1024));
-          for (let i = 0; i < 24; i++) c.enqueue(chunk); // 1.5 MiB, no length header
-          c.close();
-        },
-      }),
-    } as RequestInit);
-    expect(chunked.status).toBe(413);
+    const chunked = await statusOrReset(
+      fetch(`http://${DEFAULT_BIND}:${s.port}/ingest`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        duplex: "half",
+        body: new ReadableStream<Uint8Array>({
+          start(c) {
+            const chunk = new TextEncoder().encode("X".repeat(64 * 1024));
+            for (let i = 0; i < 24; i++) c.enqueue(chunk); // 1.5 MiB, no length header
+            c.close();
+          },
+        }),
+      } as RequestInit),
+    );
+    expect([413, "reset"]).toContain(chunked);
     expect(s.records()).toEqual([]);
 
     // …and a body just under the cap still goes through.

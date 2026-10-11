@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { main } from "../src/cli";
 import { describeConfig, loadConfig } from "../src/config";
@@ -51,6 +52,11 @@ function writeExec(dir: string, name: string, body: string): string {
   writeFileSync(p, body, { mode: 0o755 });
   chmodSync(p, 0o755);
   return p;
+}
+
+/** A key command that runs a JS snippet on the test's own Bun; `#!/bin/sh` scripts do not run on Windows. */
+function bunCommand(js: string): string[] {
+  return [process.execPath, "-e", js];
 }
 
 function runConfig(dir: string, extra: Record<string, unknown> = {}) {
@@ -262,6 +268,8 @@ describe("run: preflight", () => {
       run: cfg.run,
       stateDir: cfg.stateDir,
       observe: false,
+      // Windows has no mode bits and preflight skips the check there, so report what POSIX would.
+      ...(process.platform === "win32" ? { platform: "linux" as const, mode: () => 0o644 } : {}),
       probe: async () => false,
       duplicateSessionTitle: async () => false,
     });
@@ -325,7 +333,10 @@ describe("run: the CLI", () => {
     expect(text).not.toContain("EARS UP");
   });
 
-  test("a relative config path is forwarded absolute; RELAY_BACKPORT_CONFIG without --config is enough", async () => {
+  // On Windows the runner's temp dir (C:) and the workspace (D:) are on different drives,
+  // and there is no relative path between drives.
+  const crossDrive = isAbsolute(relative(process.cwd(), tmpdir()));
+  test.skipIf(crossDrive)("a relative config path is forwarded absolute; RELAY_BACKPORT_CONFIG without --config is enough", async () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);
     const configAbs = join(t.dir, "rb.json");
@@ -458,6 +469,8 @@ describe("run: key command", () => {
     const missingLines = await preflight({ plan: missing.plan, run: missing.cfg.run, stateDir: missing.cfg.stateDir, observe: false });
     expect(missingLines.some((l) => l.level === "FAIL" && l.text.includes("key command not found: no-such-relay-backport-key-cmd"))).toBe(true);
 
+    // Windows has no executable bit; preflight only checks existence there.
+    if (process.platform === "win32") return;
     const script = writeExec(t.dir, "print-key", "#!/bin/sh\nexit 0\n");
     chmodSync(script, 0o644);
     const blocked = planOf(t.dir, { key_command: [script] });
@@ -468,8 +481,7 @@ describe("run: key command", () => {
   test("a good key command puts the trimmed key in the child environment and nowhere else", async () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);
-    const script = writeExec(t.dir, "print-key", `#!/bin/sh\nprintf '%s\\n' '${SECRET}'\n`);
-    const { cfg, plan } = planOf(t.dir, { key_command: [script] });
+    const { cfg, plan } = planOf(t.dir, { key_command: bunCommand(`console.log(${JSON.stringify(SECRET)})`) });
     let seen: { command: string; args: string[]; env: Record<string, string> } | undefined;
     const outs: string[] = [];
     const code = await runHarness({
@@ -495,8 +507,7 @@ describe("run: key command", () => {
   test("empty stdout fails and the child is never spawned", async () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);
-    const script = writeExec(t.dir, "print-key", "#!/bin/sh\nprintf '\\n'\n");
-    const { cfg, plan } = planOf(t.dir, { key_command: [script] });
+    const { cfg, plan } = planOf(t.dir, { key_command: bunCommand('console.log("")') });
     let spawned = false;
     let message = "";
     try {
@@ -522,8 +533,7 @@ describe("run: key command", () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);
     const leak = "not-a-key-should-not-leak";
-    const script = writeExec(t.dir, "print-key", `#!/bin/sh\nprintf '%s\\n' '${leak}'\n`);
-    const { cfg, plan } = planOf(t.dir, { key_command: [script] });
+    const { cfg, plan } = planOf(t.dir, { key_command: bunCommand(`console.log(${JSON.stringify(leak)})`) });
     let message = "";
     try {
       await runHarness({ plan, run: cfg.run, stateDir: cfg.stateDir, env: {}, out: () => {} });
@@ -540,8 +550,9 @@ describe("run: key command", () => {
     cleanups.push(t.cleanup);
     const leak = "stdout-leak-should-not-appear";
     const errLeak = "stderr-leak-should-not-appear";
-    const script = writeExec(t.dir, "print-key", `#!/bin/sh\nprintf '%s\\n' '${leak}'\nprintf '%s\\n' '${errLeak}' >&2\nexit 3\n`);
-    const { cfg, plan } = planOf(t.dir, { key_command: [script] });
+    const { cfg, plan } = planOf(t.dir, {
+      key_command: bunCommand(`console.log(${JSON.stringify(leak)}); console.error(${JSON.stringify(errLeak)}); process.exit(3)`),
+    });
     let message = "";
     try {
       await runHarness({ plan, run: cfg.run, stateDir: cfg.stateDir, env: {}, out: () => {} });
@@ -557,8 +568,7 @@ describe("run: key command", () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);
     const leak = "timeout-leak-should-not-appear";
-    const script = writeExec(t.dir, "print-key", `#!/bin/sh\nprintf '%s\\n' '${leak}'\nexec sleep 30\n`);
-    const { cfg, plan } = planOf(t.dir, { key_command: [script] });
+    const { cfg, plan } = planOf(t.dir, { key_command: bunCommand(`console.log(${JSON.stringify(leak)}); setTimeout(() => {}, 30_000)`) });
     const started = Date.now();
     let message = "";
     try {
@@ -612,7 +622,7 @@ describe("run: key command", () => {
     const t = tmpDir();
     cleanups.push(t.cleanup);
     const marker = join(t.dir, "key-command-ran");
-    const script = writeExec(t.dir, "print-key", `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nprintf '%s\\n' '${SECRET}'\n`);
+    const keyCommand = bunCommand(`require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran"); console.log(${JSON.stringify(SECRET)})`);
     const config = join(t.dir, "rb.json");
     writeFileSync(
       config,
@@ -620,7 +630,7 @@ describe("run: key command", () => {
         state_dir: t.dir,
         run: {
           buzz_acp: fakeBinary(t.dir),
-          key_command: [script],
+          key_command: keyCommand,
           relay_url: "ws://127.0.0.1:1",
           owner: ALICE,
           allowlist: [ALICE, BOB],
@@ -631,7 +641,7 @@ describe("run: key command", () => {
     expect(await main(["run", "--dry-run", "--config", config], c)).toBe(0);
     const text = c.outLines.join("\n");
     expect(existsSync(marker)).toBe(false);
-    expect(text).toContain(`<from key_command: ${script}>`);
+    expect(text).toContain(`<from key_command: ${keyCommand[0]}>`);
     expect(text).toContain("key command executable");
     expect(text).toContain("(not run)");
     expect(text).toContain("--dry-run: stopping here");

@@ -283,7 +283,8 @@ describe("relay-backport acp", () => {
     expect(await c.close()).toBe(0);
     const err = await c.stderr();
     expect(err).not.toContain(key);
-    expect(err).toContain(`wrote buzz env file ${envFile} (3 vars)`);
+    // stderr is JSON lines, so a Windows path arrives with its backslashes escaped.
+    expect(err).toContain(`wrote buzz env file ${JSON.stringify(envFile).slice(1, -1)} (3 vars)`);
   });
 
   test("a config problem exits 1 before speaking ACP", async () => {

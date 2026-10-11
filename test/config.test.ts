@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { ConfigError, defaultStateDir, describeConfig, loadConfig } from "../src/config";
 import { clearSecrets, configureLog, redact } from "../src/log";
 
 configureLog({ writer: () => {} });
+
+// loadConfig resolves every path, so on Windows "/etc/rb.toml" reaches readFile as
+// "D:\etc\rb.toml" and "/s" comes back as "D:\s". `posix` maps it back for the
+// fixture lookups; `abs` is what a resolved POSIX literal should equal.
+const posix = (p: string) => p.replace(/^[A-Za-z]:/, "").replaceAll("\\", "/");
+const abs = (p: string) => resolve(p);
 
 const files: Record<string, string> = {
   "/etc/rb.toml": `
@@ -26,7 +32,7 @@ pass_buzz_env = true
   "/etc/bad.toml": "sinks = [",
 };
 const readFile = (p: string) => {
-  const v = files[p];
+  const v = files[posix(p)];
   if (v === undefined) throw new Error("ENOENT");
   return v;
 };
@@ -35,8 +41,9 @@ describe("config loading", () => {
   test("defaults: the file sink under the platform state dir, 15 s delivery wait, text logs", () => {
     const cfg = loadConfig({ env: { HOME: "/home/u" }, readFile });
     expect(cfg.sinks).toEqual(["file"]);
-    expect(cfg.stateDir).toBe("/home/u/.local/state/relay-backport");
-    expect(cfg.file?.path).toBe("/home/u/.local/state/relay-backport/deliveries.jsonl");
+    const stateDir = abs(defaultStateDir({ HOME: "/home/u" }));
+    expect(cfg.stateDir).toBe(stateDir);
+    expect(cfg.file?.path).toBe(join(stateDir, "deliveries.jsonl"));
     expect(cfg.deliveryWaitMs).toBe(15_000);
     expect(cfg.logFormat).toBe("text");
     expect(cfg.relayUrl).toBe("");
@@ -55,23 +62,23 @@ describe("config loading", () => {
 
   test("TOML file: every table, arrays kept as arrays", () => {
     const cfg = loadConfig({ configPath: "/etc/rb.toml", env: {}, readFile });
-    expect(cfg.stateDir).toBe("/var/lib/rb");
+    expect(cfg.stateDir).toBe(abs("/var/lib/rb"));
     expect(cfg.sinks).toEqual(["file", "webhook", "exec"]);
     expect(cfg.deliveryWaitMs).toBe(2500);
-    expect(cfg.file).toEqual({ path: "/var/log/rb/deliveries.jsonl", systemPrompt: true, buzzEnvFile: undefined, contentMaxChars: 0, threadContext: "cumulative", threadContextMaxChars: 32_000, promptFields: false });
+    expect(cfg.file).toEqual({ path: abs("/var/log/rb/deliveries.jsonl"), systemPrompt: true, buzzEnvFile: undefined, contentMaxChars: 0, threadContext: "cumulative", threadContextMaxChars: 32_000, promptFields: false });
     expect(cfg.view).toEqual({ name: "raw", visibleChars: 500, hide: [] });
     expect(cfg.channels).toEqual({});
     expect(cfg.identities).toEqual({});
     expect(cfg.webhook).toEqual({ url: "https://hooks.example.com/x", bearerFile: undefined, timeoutMs: 1234, attempts: 3, includeSystemPrompt: true, threadContext: "delta", cumulativeMaxChars: 32_000 });
     expect(cfg.exec).toEqual({ command: ["/usr/local/bin/handle", "--from-relay"], timeoutMs: 60_000, passBuzzEnv: true, includeSystemPrompt: false });
-    expect(cfg.configPath).toBe("/etc/rb.toml");
+    expect(cfg.configPath).toBe(abs("/etc/rb.toml"));
   });
 
   test("JSON file; RELAY_BACKPORT_CONFIG names the file; env overrides the file; flags override env", () => {
     const cfg = loadConfig({ env: { RELAY_BACKPORT_CONFIG: "/etc/rb.json" }, readFile });
     expect(cfg.sinks).toEqual(["webhook"]);
     expect(cfg.webhook?.attempts).toBe(1);
-    expect(cfg.configPath).toBe("/etc/rb.json");
+    expect(cfg.configPath).toBe(abs("/etc/rb.json"));
     const layered = loadConfig({
       configPath: "/etc/rb.toml",
       env: { RELAY_BACKPORT_SINKS: "file", RELAY_BACKPORT_FILE: "/env/deliveries.jsonl", RELAY_BACKPORT_LOG_FORMAT: "json" },
@@ -79,9 +86,9 @@ describe("config loading", () => {
       readFile,
     });
     expect(layered.sinks).toEqual(["file"]);
-    expect(layered.file?.path).toBe("/flag/deliveries.jsonl");
+    expect(layered.file?.path).toBe(abs("/flag/deliveries.jsonl"));
     expect(layered.logFormat).toBe("json");
-    expect(layered.stateDir).toBe("/var/lib/rb");
+    expect(layered.stateDir).toBe(abs("/var/lib/rb"));
   });
 
   test("every RELAY_BACKPORT_* variable is honoured", () => {
@@ -105,10 +112,10 @@ describe("config loading", () => {
       },
       readFile,
     });
-    expect(cfg.stateDir).toBe("/s");
+    expect(cfg.stateDir).toBe(abs("/s"));
     expect(cfg.sinks).toEqual(["webhook", "exec"]);
     expect(cfg.deliveryWaitMs).toBe(100);
-    expect(cfg.webhook).toEqual({ url: "https://h.example/x", bearerFile: "/s/bearer", timeoutMs: 5, attempts: 2, includeSystemPrompt: true, threadContext: "delta", cumulativeMaxChars: 32_000 });
+    expect(cfg.webhook).toEqual({ url: "https://h.example/x", bearerFile: abs("/s/bearer"), timeoutMs: 5, attempts: 2, includeSystemPrompt: true, threadContext: "delta", cumulativeMaxChars: 32_000 });
     expect(cfg.exec).toEqual({ command: ["/bin/handle", "--x"], timeoutMs: 9, passBuzzEnv: true, includeSystemPrompt: false });
     expect(cfg.relayUrl).toBe("wss://relay.example");
     expect(cfg.file).toBeUndefined();
@@ -134,7 +141,7 @@ describe("config loading", () => {
       loadConfig({
         configPath: "/etc/empty-reaction.toml",
         env: {},
-        readFile: (p) => (p === "/etc/empty-reaction.toml" ? '[receipt]\nreaction = ""\n' : readFile(p)),
+        readFile: (p) => (posix(p) === "/etc/empty-reaction.toml" ? '[receipt]\nreaction = ""\n' : readFile(p)),
       }),
     ).toThrow(/receipt\.reaction/);
   });
@@ -158,14 +165,14 @@ describe("config loading", () => {
       },
       readFile,
     });
-    expect(cfg.file).toMatchObject({ systemPrompt: false, buzzEnvFile: "/s/buzz.env" });
+    expect(cfg.file).toMatchObject({ systemPrompt: false, buzzEnvFile: abs("/s/buzz.env") });
     expect(cfg.webhook).toMatchObject({ includeSystemPrompt: false });
     expect(cfg.exec).toMatchObject({ includeSystemPrompt: true });
 
     const described = describeConfig(cfg);
     expect(JSON.stringify(described)).not.toContain("nsec1");
     expect(described).toMatchObject({
-      file: { system_prompt: false, buzz_env_file: "/s/buzz.env" },
+      file: { system_prompt: false, buzz_env_file: abs("/s/buzz.env") },
       webhook: { include_system_prompt: false },
       exec: { include_system_prompt: true },
     });
@@ -178,7 +185,7 @@ describe("config loading", () => {
     const fromToml = loadConfig({
       configPath: "/etc/cap.toml",
       env: {},
-      readFile: (p) => (p === "/etc/cap.toml" ? '[file]\ncontent_max_chars = 1200\n' : readFile(p)),
+      readFile: (p) => (posix(p) === "/etc/cap.toml" ? '[file]\ncontent_max_chars = 1200\n' : readFile(p)),
     });
     expect(fromToml.file).toMatchObject({ contentMaxChars: 1200 });
     expect(describeConfig(fromToml)).toMatchObject({ file: { content_max_chars: 1200 } });
@@ -191,7 +198,7 @@ describe("config loading", () => {
       configPath: "/etc/system-prompt.toml",
       env: {},
       readFile: (p) =>
-        p === "/etc/system-prompt.toml"
+        posix(p) === "/etc/system-prompt.toml"
           ? `
 sinks = ["file", "webhook", "exec"]
 
@@ -209,7 +216,7 @@ include_system_prompt = true
 `
           : readFile(p),
     });
-    expect(cfg.file).toEqual({ path: cfg.file!.path, systemPrompt: false, buzzEnvFile: "/s/buzz.env", contentMaxChars: 0, threadContext: "cumulative", threadContextMaxChars: 32_000, promptFields: false });
+    expect(cfg.file).toEqual({ path: cfg.file!.path, systemPrompt: false, buzzEnvFile: abs("/s/buzz.env"), contentMaxChars: 0, threadContext: "cumulative", threadContextMaxChars: 32_000, promptFields: false });
     expect(cfg.webhook?.includeSystemPrompt).toBe(false);
     expect(cfg.exec?.includeSystemPrompt).toBe(true);
   });
@@ -230,7 +237,7 @@ include_system_prompt = true
       configPath: "/etc/receipt.toml",
       env: { RELAY_BACKPORT_RECEIPT_REACTION: "👍" },
       readFile: (p) =>
-        p === "/etc/receipt.toml"
+        posix(p) === "/etc/receipt.toml"
           ? `
 [receipt]
 enabled = true
@@ -249,7 +256,7 @@ max_seen = 50
       configPath: "/etc/view.toml",
       env: {},
       readFile: (p) =>
-        p === "/etc/view.toml"
+        posix(p) === "/etc/view.toml"
           ? `
 [file]
 prompt_fields = true

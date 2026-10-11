@@ -327,7 +327,7 @@ describe("exec sink", () => {
     expect(seen.LC_ALL).toBe("C");
     expect(seen.RELAY_BACKPORT_EVENT_ID).toBe(d.event.id);
     expect(seen.RELAY_BACKPORT_AUTHOR).toBe(SENDER);
-    for (const k of Object.keys(seen)) expect(HOOK_ENV_PASSTHROUGH.includes(k) || k.startsWith("LC_") || k.startsWith("RELAY_BACKPORT_")).toBe(true);
+    expect(Object.keys(seen).filter((k) => !(HOOK_ENV_PASSTHROUGH.includes(k) || k.startsWith("LC_") || k.startsWith("RELAY_BACKPORT_")))).toEqual([]);
 
     expect(await new ExecSink({ command: [process.execPath, script], timeoutMs: 10_000, passBuzzEnv: true, includeSystemPrompt: false }, harnessEnv).deliver(d)).toBe(true);
     const withBuzz = JSON.parse(await Bun.file(out).text()) as Record<string, string>;
