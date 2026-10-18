@@ -11,7 +11,7 @@
 
 # Base images are pinned by digest (Dependabot's docker ecosystem keeps them current).
 # The oven/bun tag must equal .bun-version; CI fails if they drift.
-FROM oven/bun:1.3.6@sha256:f20d9cf365ab35529384f1717687c739c92e6f39157a35a95ef06f4049a10e4a AS build
+FROM oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS build
 WORKDIR /src
 COPY package.json bun.lock tsconfig.json ./
 RUN bun install --frozen-lockfile
