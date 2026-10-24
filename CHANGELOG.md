@@ -2,6 +2,19 @@
 
 All notable changes to relay-backport. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## 0.7.2 — 2026-10-24
+
+the release binaries and the container image are built with Bun 1.4.4; no change to relay-backport's own behaviour
+
+### Security
+
+- **Bun 1.3.6 → 1.4.4** (`.bun-version`, `deploy/Dockerfile`). The `relay-backport-*` release binaries and the container image embed the Bun runtime (`bun build --compile`), so a runtime advisory stays in a binary until it is rebuilt. Bun 1.4.4 fixes three high-severity advisories that affect 1.4.3 and earlier:
+  - [GHSA-26q8-h657-pf84](https://github.com/oven-sh/bun/security/advisories/GHSA-26q8-h657-pf84): the bundled root certificates trusted compromised emSign (eMudhra) intermediate CAs, so a party on the network path could present a certificate Bun accepted for any host. This is the one that matters most here: the delivery receipt (a WebSocket to the relay), the relay info request and the webhook sink all use TLS with Bun's default trust store.
+  - [GHSA-663w-cv8g-jj2p](https://github.com/oven-sh/bun/security/advisories/GHSA-663w-cv8g-jj2p) (CVE-2026-111497): an out-of-bounds write in the bundled brotli decoder. `fetch` decodes a `Content-Encoding: br` response by default, and the webhook sink and the relay info request use `fetch`.
+  - [GHSA-cf8x-9m69-3gg3](https://github.com/oven-sh/bun/security/advisories/GHSA-cf8x-9m69-3gg3): HTTP/3 QPACK amplification. relay-backport does not enable HTTP/3 (not in `Bun.serve`, not in `fetch`), so this one does not apply; it is fixed in the same upgrade.
+- **The container base image** is `oven/bun:1.4.4`, pinned by the digest of the multi-arch index.
+- Release binaries and images built before this version embed the older runtime. Upgrade to v0.7.2 or later.
+
 ## 0.7.1 — 2026-10-06
 
 a test for the `ch` field; no change to what the view prints
